@@ -1,0 +1,10 @@
+[
+  { "name": "2025 Nanyang Prelim Science Paper 1", "subject": "Science", "maxTimeMinutes": 90 },
+  { "name": "2025 Nanyang Prelim Science Paper 2", "subject": "Science", "maxTimeMinutes": 90 },
+  { "name": "2025 Rosyth Prelim Mathematics Paper 1", "subject": "Mathematics", "maxTimeMinutes": 90 },
+  { "name": "2025 Rosyth Prelim Mathematics Paper 2", "subject": "Mathematics", "maxTimeMinutes": 90 },
+  { "name": "2025 Catholic High Prelim English Paper 1", "subject": "English", "maxTimeMinutes": 90 },
+  { "name": "2025 Catholic High Prelim English Paper 2", "subject": "English", "maxTimeMinutes": 90 },
+  { "name": "2021 Raffles Prelim English Paper 1", "subject": "English", "maxTimeMinutes": 90 },
+  { "name": "2021 Raffles Prelim English Paper 2", "subject": "English", "maxTimeMinutes": 90 }
+]

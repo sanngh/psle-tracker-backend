@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+!.env.example
+uploads
+psle_tracker.db
+data
+.git
+.gitignore
+test
