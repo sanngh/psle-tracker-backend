@@ -4,7 +4,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm_config_build_from_source=true npm ci --omit=dev
 
 FROM node:20-bookworm-slim
 WORKDIR /app
