@@ -1019,3 +1019,177 @@ test('photo uploads use hashed phone and month folders and are retrieved by pare
   assert.ok(mistake.photos.some(url => url === uploadData.imageUrl));
   assert.ok(mistake.descriptions.includes('Misread the question instructions.'));
 });
+
+test('PIN setup requires a valid 6-digit PIN with matching confirmation', async () => {
+  const pinUser = '7660001111';
+  await jsonRequest('/auth/onboard', {
+    userKey: pinUser,
+    selectedTopics: [{ name: 'PIN setup topic', subject: 'Science', level: 'P6' }],
+    role: 'student'
+  });
+
+  const tooShort = await jsonRequest('/auth/pin/setup', { userKey: pinUser, pin: '123', confirmPin: '123' });
+  assert.equal(tooShort.status, 400);
+
+  const mismatch = await jsonRequest('/auth/pin/setup', { userKey: pinUser, pin: '111111', confirmPin: '222222' });
+  assert.equal(mismatch.status, 400);
+
+  const success = await jsonRequest('/auth/pin/setup', { userKey: pinUser, pin: '445566', confirmPin: '445566' });
+  assert.equal(success.status, 200);
+
+  const status = await jsonRequest('/auth/pin/status', { userKey: pinUser });
+  assert.equal(status.status, 200);
+  const statusData = await status.json();
+  assert.equal(statusData.pinSet, true);
+  assert.equal(statusData.locked, false);
+});
+
+test('correct PIN verifies successfully and resets any prior failed attempts', async () => {
+  const pinUser = '7660002222';
+  await jsonRequest('/auth/onboard', {
+    userKey: pinUser,
+    selectedTopics: [{ name: 'PIN verify topic', subject: 'Science', level: 'P6' }],
+    role: 'student'
+  });
+  await jsonRequest('/auth/pin/setup', { userKey: pinUser, pin: '778899', confirmPin: '778899' });
+
+  const wrongAttempt = await jsonRequest('/auth/pin/verify', { userKey: pinUser, pin: '000000' });
+  assert.equal(wrongAttempt.status, 401);
+  assert.equal((await wrongAttempt.json()).attemptsRemaining, 2);
+
+  const correctAttempt = await jsonRequest('/auth/pin/verify', { userKey: pinUser, pin: '778899' });
+  assert.equal(correctAttempt.status, 200);
+  assert.equal((await correctAttempt.json()).success, true);
+
+  const statusAfter = await jsonRequest('/auth/pin/status', { userKey: pinUser });
+  assert.equal((await statusAfter.json()).locked, false);
+});
+
+test('three incorrect PIN attempts locks the account and blocks further verification', async () => {
+  const pinUser = '7660003333';
+  await jsonRequest('/auth/onboard', {
+    userKey: pinUser,
+    selectedTopics: [{ name: 'PIN lockout topic', subject: 'Science', level: 'P6' }],
+    role: 'student'
+  });
+  await jsonRequest('/auth/pin/setup', { userKey: pinUser, pin: '135790', confirmPin: '135790' });
+
+  const first = await jsonRequest('/auth/pin/verify', { userKey: pinUser, pin: '000000' });
+  assert.equal(first.status, 401);
+  assert.equal((await first.json()).attemptsRemaining, 2);
+
+  const second = await jsonRequest('/auth/pin/verify', { userKey: pinUser, pin: '000000' });
+  assert.equal(second.status, 401);
+  assert.equal((await second.json()).attemptsRemaining, 1);
+
+  const third = await jsonRequest('/auth/pin/verify', { userKey: pinUser, pin: '000000' });
+  assert.equal(third.status, 423);
+  const thirdData = await third.json();
+  assert.equal(thirdData.locked, true);
+  assert.equal(thirdData.attemptsRemaining, 0);
+
+  const statusAfterLock = await jsonRequest('/auth/pin/status', { userKey: pinUser });
+  assert.equal((await statusAfterLock.json()).locked, true);
+
+  const correctButLocked = await jsonRequest('/auth/pin/verify', { userKey: pinUser, pin: '135790' });
+  assert.equal(correctButLocked.status, 423);
+});
+
+test('only a linked parent or student can unlock a locked PIN, resetting attempts', async () => {
+  const parentPhone = '7660004411';
+  const studentPhone = '7660004422';
+  const strangerPhone = '7660004433';
+
+  await jsonRequest('/auth/onboard', {
+    userKey: parentPhone,
+    selectedTopics: [{ name: 'PIN unlock parent', subject: 'Science', level: 'P6' }],
+    role: 'parent',
+    studentUserKey: studentPhone
+  });
+  await jsonRequest('/auth/onboard', {
+    userKey: strangerPhone,
+    selectedTopics: [{ name: 'PIN unlock stranger', subject: 'Science', level: 'P6' }],
+    role: 'parent'
+  });
+  await jsonRequest('/auth/pin/setup', { userKey: studentPhone, pin: '246810', confirmPin: '246810' });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await jsonRequest('/auth/pin/verify', { userKey: studentPhone, pin: '000000' });
+  }
+  const lockedStatus = await jsonRequest('/auth/pin/status', { userKey: studentPhone });
+  assert.equal((await lockedStatus.json()).locked, true);
+
+  const unauthorizedUnlock = await jsonRequest('/auth/pin/unlock', { requesterUserKey: strangerPhone, targetUserKey: studentPhone });
+  assert.equal(unauthorizedUnlock.status, 403);
+
+  const authorizedUnlock = await jsonRequest('/auth/pin/unlock', { requesterUserKey: parentPhone, targetUserKey: studentPhone });
+  assert.equal(authorizedUnlock.status, 200);
+
+  const unlockedStatus = await jsonRequest('/auth/pin/status', { userKey: studentPhone });
+  const unlockedData = await unlockedStatus.json();
+  assert.equal(unlockedData.locked, false);
+
+  const verifyAfterUnlock = await jsonRequest('/auth/pin/verify', { userKey: studentPhone, pin: '246810' });
+  assert.equal(verifyAfterUnlock.status, 200);
+});
+
+test('a linked student can unlock their locked parent account', async () => {
+  const parentPhone = '7660005511';
+  const studentPhone = '7660005522';
+  const strangerPhone = '7660005533';
+
+  await jsonRequest('/auth/onboard', {
+    userKey: parentPhone,
+    selectedTopics: [{ name: 'Reverse unlock parent', subject: 'Science', level: 'P6' }],
+    role: 'parent',
+    studentUserKey: studentPhone
+  });
+  await jsonRequest('/auth/onboard', {
+    userKey: strangerPhone,
+    selectedTopics: [{ name: 'Reverse unlock stranger', subject: 'Science', level: 'P6' }],
+    role: 'student'
+  });
+  await jsonRequest('/auth/pin/setup', { userKey: parentPhone, pin: '135791', confirmPin: '135791' });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await jsonRequest('/auth/pin/verify', { userKey: parentPhone, pin: '000000' });
+  }
+  const lockedStatus = await jsonRequest('/auth/pin/status', { userKey: parentPhone });
+  assert.equal((await lockedStatus.json()).locked, true);
+
+  const unauthorizedUnlock = await jsonRequest('/auth/pin/unlock', { requesterUserKey: strangerPhone, targetUserKey: parentPhone });
+  assert.equal(unauthorizedUnlock.status, 403);
+
+  const studentUnlocksParent = await jsonRequest('/auth/pin/unlock', { requesterUserKey: studentPhone, targetUserKey: parentPhone });
+  assert.equal(studentUnlocksParent.status, 200);
+
+  const unlockedStatus = await jsonRequest('/auth/pin/status', { userKey: parentPhone });
+  assert.equal((await unlockedStatus.json()).locked, false);
+
+  const verifyAfterUnlock = await jsonRequest('/auth/pin/verify', { userKey: parentPhone, pin: '135791' });
+  assert.equal(verifyAfterUnlock.status, 200);
+});
+
+test('linked children list surfaces PIN lock status so a parent can offer to unlock', async () => {
+  const parentPhone = '7660005511';
+  const studentPhone = '7660005522';
+
+  await jsonRequest('/auth/onboard', {
+    userKey: parentPhone,
+    selectedTopics: [{ name: 'PIN lock visibility parent', subject: 'Science', level: 'P6' }],
+    role: 'parent',
+    studentUserKey: studentPhone
+  });
+  await jsonRequest('/auth/pin/setup', { userKey: studentPhone, pin: '112233', confirmPin: '112233' });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await jsonRequest('/auth/pin/verify', { userKey: studentPhone, pin: '000000' });
+  }
+
+  const childrenResponse = await jsonRequest('/links/children', { userKey: parentPhone });
+  assert.equal(childrenResponse.status, 200);
+  const children = await childrenResponse.json();
+  const linkedChild = children.find(child => child.student_phone === studentPhone);
+  assert.ok(linkedChild);
+  assert.equal(Number(linkedChild.locked), 1);
+});
+

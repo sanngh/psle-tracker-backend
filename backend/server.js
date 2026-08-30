@@ -213,6 +213,10 @@ const initializeDatabaseSchema = (database) => {
     database.run("ALTER TABLE users ADD COLUMN user_id INTEGER", () => {});
     database.run("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'student'", () => {});
     database.run("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0", () => {});
+    database.run("ALTER TABLE users ADD COLUMN pin_hash TEXT", () => {});
+    database.run("ALTER TABLE users ADD COLUMN pin_salt TEXT", () => {});
+    database.run("ALTER TABLE users ADD COLUMN pin_failed_attempts INTEGER DEFAULT 0", () => {});
+    database.run("ALTER TABLE users ADD COLUMN pin_locked INTEGER DEFAULT 0", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS user_links (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_phone TEXT NOT NULL, student_phone TEXT NOT NULL, user_key TEXT, parent_user_id INTEGER, student_user_id INTEGER, created_at TEXT NOT NULL, UNIQUE(parent_phone, student_phone))`);
     database.run("ALTER TABLE user_links ADD COLUMN user_key TEXT", () => {});
     database.run("ALTER TABLE user_links ADD COLUMN parent_user_id INTEGER", () => {});
@@ -718,6 +722,98 @@ app.post('/api/auth/onboard', (req, res) => {
   });
 });
 
+const PIN_MAX_ATTEMPTS = 3;
+const hashPin = (pin, salt) => crypto.scryptSync(String(pin), salt, 64).toString('hex');
+const isValidPin = (pin) => /^\d{6}$/.test(String(pin || ''));
+
+app.post('/api/auth/pin/setup', (req, res) => {
+  const cleanPhone = String(req.body?.userKey || '').trim();
+  const { pin, confirmPin } = req.body || {};
+  if (!cleanPhone) return res.status(400).json({ error: 'User key is required.' });
+  if (!isValidPin(pin) || !isValidPin(confirmPin)) return res.status(400).json({ error: 'PIN must be exactly 6 digits.' });
+  if (String(pin) !== String(confirmPin)) return res.status(400).json({ error: 'PIN and confirmation PIN do not match.' });
+
+  db.get('SELECT phone FROM users WHERE phone = ?', [cleanPhone], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.status(404).json({ error: 'User not found.' });
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const pinHash = hashPin(pin, salt);
+    db.run(
+      'UPDATE users SET pin_hash = ?, pin_salt = ?, pin_failed_attempts = 0, pin_locked = 0 WHERE phone = ?',
+      [pinHash, salt, cleanPhone],
+      function(updateErr) {
+        if (updateErr) return res.status(500).json({ error: updateErr.message });
+        res.json({ success: true });
+      }
+    );
+  });
+});
+
+app.post('/api/auth/pin/status', (req, res) => {
+  const cleanPhone = String(req.body?.userKey || '').trim();
+  if (!cleanPhone) return res.status(400).json({ error: 'User key is required.' });
+
+  db.get('SELECT pin_hash, pin_locked FROM users WHERE phone = ?', [cleanPhone], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.status(404).json({ error: 'User not found.' });
+    res.json({ pinSet: Boolean(row.pin_hash), locked: Number(row.pin_locked) === 1 });
+  });
+});
+
+app.post('/api/auth/pin/verify', (req, res) => {
+  const cleanPhone = String(req.body?.userKey || '').trim();
+  const { pin } = req.body || {};
+  if (!cleanPhone || !isValidPin(pin)) return res.status(400).json({ error: 'A valid 6-digit PIN is required.' });
+
+  db.get('SELECT pin_hash, pin_salt, pin_failed_attempts, pin_locked FROM users WHERE phone = ?', [cleanPhone], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.status(404).json({ error: 'User not found.' });
+    if (!row.pin_hash) return res.status(409).json({ error: 'PIN has not been set up for this account.' });
+    if (Number(row.pin_locked) === 1) return res.status(423).json({ success: false, locked: true, error: 'Account is locked after too many incorrect attempts. Ask your linked parent/student to unlock it.' });
+
+    const suppliedHash = hashPin(pin, row.pin_salt);
+    const storedBuffer = Buffer.from(row.pin_hash, 'hex');
+    const suppliedBuffer = Buffer.from(suppliedHash, 'hex');
+    const matches = storedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(storedBuffer, suppliedBuffer);
+
+    if (matches) {
+      return db.run('UPDATE users SET pin_failed_attempts = 0 WHERE phone = ?', [cleanPhone], (resetErr) => {
+        if (resetErr) return res.status(500).json({ error: resetErr.message });
+        res.json({ success: true });
+      });
+    }
+
+    const attempts = Number(row.pin_failed_attempts || 0) + 1;
+    const locked = attempts >= PIN_MAX_ATTEMPTS;
+    db.run('UPDATE users SET pin_failed_attempts = ?, pin_locked = ? WHERE phone = ?', [attempts, locked ? 1 : 0, cleanPhone], (updateErr) => {
+      if (updateErr) return res.status(500).json({ error: updateErr.message });
+      res.status(locked ? 423 : 401).json({ success: false, locked, attemptsRemaining: Math.max(0, PIN_MAX_ATTEMPTS - attempts) });
+    });
+  });
+});
+
+app.post('/api/auth/pin/unlock', (req, res) => {
+  const requesterPhone = String(req.body?.requesterUserKey || '').trim();
+  const targetPhone = String(req.body?.targetUserKey || '').trim();
+  if (!requesterPhone || !targetPhone) return res.status(400).json({ error: 'Both requester and target user keys are required.' });
+
+  db.get(
+    'SELECT 1 FROM user_links WHERE (parent_phone = ? AND student_phone = ?) OR (parent_phone = ? AND student_phone = ?)',
+    [requesterPhone, targetPhone, targetPhone, requesterPhone],
+    (linkErr, link) => {
+      if (linkErr) return res.status(500).json({ error: linkErr.message });
+      if (!link) return res.status(403).json({ error: 'You are not linked to this account.' });
+
+      db.run('UPDATE users SET pin_failed_attempts = 0, pin_locked = 0 WHERE phone = ?', [targetPhone], function(updateErr) {
+        if (updateErr) return res.status(500).json({ error: updateErr.message });
+        if (this.changes === 0) return res.status(404).json({ error: 'Target user not found.' });
+        res.json({ success: true });
+      });
+    }
+  );
+});
+
 app.post('/api/links/create', (req, res) => {
   const { parentUserKey, studentUserKey } = req.body;
   if (!parentUserKey || !studentUserKey) return res.status(400).json({ error: 'Both parent and student phone numbers are required.' });
@@ -753,10 +849,14 @@ app.post('/api/links/children', (req, res) => {
   if (!userKey) return res.status(400).json({ error: 'Parent user key is required.' });
 
   const parentPhone = String(userKey).trim();
-  db.all('SELECT id, parent_phone, student_phone, user_key, created_at FROM user_links WHERE parent_phone = ? ORDER BY created_at DESC', [parentPhone], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows || []);
-  });
+  db.all(
+    'SELECT ul.id, ul.parent_phone, ul.student_phone, ul.user_key, ul.created_at, u.pin_locked AS locked FROM user_links ul LEFT JOIN users u ON u.phone = ul.student_phone WHERE ul.parent_phone = ? ORDER BY ul.created_at DESC',
+    [parentPhone],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json((rows || []).map(row => ({ ...row, locked: Number(row.locked) === 1 })));
+    }
+  );
 });
 
 app.post('/api/links/parent', (req, res) => {
@@ -764,10 +864,14 @@ app.post('/api/links/parent', (req, res) => {
   if (!userKey) return res.status(400).json({ error: 'Student user key is required.' });
 
   const studentPhone = String(userKey).trim();
-  db.all('SELECT id, parent_phone, student_phone, user_key, created_at FROM user_links WHERE student_phone = ? ORDER BY created_at DESC', [studentPhone], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows || []);
-  });
+  db.all(
+    'SELECT ul.id, ul.parent_phone, ul.student_phone, ul.user_key, ul.created_at, u.pin_locked AS locked FROM user_links ul LEFT JOIN users u ON u.phone = ul.parent_phone WHERE ul.student_phone = ? ORDER BY ul.created_at DESC',
+    [studentPhone],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json((rows || []).map(row => ({ ...row, locked: Number(row.locked) === 1 })));
+    }
+  );
 });
 
 app.post('/api/exams/add', (req, res) => {
