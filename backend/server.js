@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 const multer = require('multer');
 const sqlite3 = require('sqlite3').verbose();
 const { createClient } = require('@libsql/client');
@@ -49,6 +50,19 @@ const apiLimiter = rateLimit({
   message: { error: 'Too many requests. Please wait before retrying.' }
 });
 app.use('/api', apiLimiter);
+
+// Tighter limiter for phone-lookup/PIN endpoints, keyed by IP+phone so a rotating-IP horizontal
+// scan across many phone numbers is still throttled per number, not just per source IP.
+const authLookupLimiter = rateLimit({
+  windowMs: config.authRateLimitWindowMs,
+  max: config.authRateLimitMaxRequests,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${String(req.body?.userKey || '').trim()}`,
+  message: { error: 'Too many attempts for this account. Please wait before retrying.' }
+});
+app.use('/api/auth/check', authLookupLimiter);
+app.use('/api/auth/pin/verify', authLookupLimiter);
 
 const uploadsDir = config.uploadsDir;
 if (mediaStorage.provider === 'local' && !fs.existsSync(uploadsDir)) {

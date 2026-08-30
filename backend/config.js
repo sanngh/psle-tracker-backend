@@ -120,6 +120,8 @@ const config = {
   corsOrigins: parseOrigins(process.env.CORS_ORIGINS),
   rateLimitWindowMs: asInteger(process.env.RATE_LIMIT_WINDOW_MS, 60 * 1000),
   rateLimitMaxRequests: asInteger(process.env.RATE_LIMIT_MAX_REQUESTS, 120),
+  authRateLimitWindowMs: asInteger(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 10 * 60 * 1000),
+  authRateLimitMaxRequests: asInteger(process.env.AUTH_RATE_LIMIT_MAX_REQUESTS, 10),
   maxJsonPayloadBytes: process.env.MAX_JSON_PAYLOAD_BYTES || '1mb',
   maxUploadBytes: parseByteSize(process.env.MAX_UPLOAD_BYTES, 100 * 1024 * 1024),
   revisionLevels: parseRevisionLevels(process.env.REVISION_LEVELS),
