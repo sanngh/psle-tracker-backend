@@ -231,6 +231,7 @@ const initializeDatabaseSchema = (database) => {
     database.run("ALTER TABLE users ADD COLUMN pin_salt TEXT", () => {});
     database.run("ALTER TABLE users ADD COLUMN pin_failed_attempts INTEGER DEFAULT 0", () => {});
     database.run("ALTER TABLE users ADD COLUMN pin_locked INTEGER DEFAULT 0", () => {});
+    database.run("ALTER TABLE users ADD COLUMN avatar TEXT", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS user_links (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_phone TEXT NOT NULL, student_phone TEXT NOT NULL, user_key TEXT, parent_user_id INTEGER, student_user_id INTEGER, created_at TEXT NOT NULL, UNIQUE(parent_phone, student_phone))`);
     database.run("ALTER TABLE user_links ADD COLUMN user_key TEXT", () => {});
     database.run("ALTER TABLE user_links ADD COLUMN parent_user_id INTEGER", () => {});
@@ -368,7 +369,7 @@ app.post('/api/auth/check', (req, res) => {
   const { userKey } = req.body;
   if (!userKey) return res.status(400).json({ error: "Mobile registration identifier missing." });
   const cleanPhone = userKey.trim();
-  db.get("SELECT COUNT(*) as count, role FROM users WHERE phone = ?", [cleanPhone], (err, row) => {
+  db.get("SELECT COUNT(*) as count, role, avatar FROM users WHERE phone = ?", [cleanPhone], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
     db.get('SELECT 1 FROM user_links WHERE parent_phone = ? LIMIT 1', [cleanPhone], (parentErr, parentLink) => {
       if (parentErr) return res.status(500).json({ error: parentErr.message });
@@ -376,9 +377,20 @@ app.post('/api/auth/check', (req, res) => {
         if (studentErr) return res.status(500).json({ error: studentErr.message });
         const exists = Number(row?.count || 0) > 0;
         const role = parentLink ? 'parent' : (studentLink ? 'student' : (row?.role || null));
-        res.json({ exists, role });
+        res.json({ exists, role, avatar: row?.avatar || null });
       });
     });
+  });
+});
+
+app.post('/api/profile/avatar', (req, res) => {
+  const cleanPhone = String(req.body?.userKey || '').trim();
+  const avatar = String(req.body?.avatar || '').trim();
+  if (!cleanPhone || !avatar) return res.status(400).json({ error: 'User key and avatar are required.' });
+  db.run('UPDATE users SET avatar = ? WHERE phone = ?', [avatar, cleanPhone], function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    if (this.changes === 0) return res.status(404).json({ error: 'User not found.' });
+    res.json({ success: true, avatar });
   });
 });
 
@@ -664,13 +676,14 @@ function seedStudentBanks(studentPhone, callback) {
 }
 
 app.post('/api/auth/onboard', (req, res) => {
-  const { userKey, selectedTopics, role, parentUserKey, studentUserKey } = req.body;
+  const { userKey, selectedTopics, role, parentUserKey, studentUserKey, avatar } = req.body;
   if (!userKey || !selectedTopics) return res.status(400).json({ error: "Onboarding parameters incomplete." });
 
   const cleanPhone = userKey.trim();
   const requestedRole = String(role || 'student').trim().toLowerCase();
   const linkedParentPhone = parentUserKey ? String(parentUserKey).trim() : '';
   const linkedStudentPhone = studentUserKey ? String(studentUserKey).trim() : '';
+  const cleanAvatar = typeof avatar === 'string' && avatar.trim() ? avatar.trim() : null;
   if (!['parent', 'student'].includes(requestedRole)) return res.status(400).json({ error: 'Role must be parent or student.' });
   if (requestedRole === 'parent' && !linkedStudentPhone) return res.status(400).json({ error: 'Student phone number is required for parent onboarding.' });
   if (requestedRole === 'parent' && linkedStudentPhone && linkedStudentPhone === cleanPhone) return res.status(400).json({ error: 'Parent and student numbers must be different.' });
@@ -682,11 +695,11 @@ app.post('/api/auth/onboard', (req, res) => {
     const createdAt = new Date().toISOString();
 
     db.serialize(() => {
-      db.run("INSERT OR IGNORE INTO users (phone, created_at, role) VALUES (?, ?, ?)", [cleanPhone, createdAt, resolvedRole], function(insertErr) {
+      db.run("INSERT OR IGNORE INTO users (phone, created_at, role, avatar) VALUES (?, ?, ?, ?)", [cleanPhone, createdAt, resolvedRole, cleanAvatar], function(insertErr) {
         if (insertErr) return res.status(500).json({ error: insertErr.message });
 
         if (this.changes === 0) {
-          db.run("UPDATE users SET role = ? WHERE phone = ?", [resolvedRole, cleanPhone], function(updateErr) {
+          db.run("UPDATE users SET role = ?, avatar = COALESCE(?, avatar) WHERE phone = ?", [resolvedRole, cleanAvatar, cleanPhone], function(updateErr) {
             if (updateErr) return res.status(500).json({ error: updateErr.message });
             continueOnboarding();
           });
