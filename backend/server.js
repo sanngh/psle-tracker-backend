@@ -283,52 +283,21 @@ const initializeDatabaseSchema = (database) => {
   if (!database) return;
 
   database.serialize(() => {
-    database.run(`CREATE TABLE IF NOT EXISTS users (phone TEXT PRIMARY KEY, user_id INTEGER UNIQUE, created_at TEXT, role TEXT DEFAULT 'student', blocked INTEGER DEFAULT 0)`);
-    database.run("ALTER TABLE users ADD COLUMN user_id INTEGER", () => {});
-    database.run("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'student'", () => {});
-    database.run("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE users ADD COLUMN pin_hash TEXT", () => {});
-    database.run("ALTER TABLE users ADD COLUMN pin_salt TEXT", () => {});
-    database.run("ALTER TABLE users ADD COLUMN pin_failed_attempts INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE users ADD COLUMN pin_locked INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE users ADD COLUMN avatar TEXT", () => {});
+    database.run(`CREATE TABLE IF NOT EXISTS users (phone TEXT PRIMARY KEY, user_id INTEGER UNIQUE, created_at TEXT, role TEXT DEFAULT 'student', blocked INTEGER DEFAULT 0, pin_hash TEXT, pin_salt TEXT, pin_failed_attempts INTEGER DEFAULT 0, pin_locked INTEGER DEFAULT 0, avatar TEXT)`);
     database.run(`CREATE TABLE IF NOT EXISTS user_links (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_phone TEXT NOT NULL, student_phone TEXT NOT NULL, user_key TEXT, parent_user_id INTEGER, student_user_id INTEGER, created_at TEXT NOT NULL, UNIQUE(parent_phone, student_phone))`);
-    database.run("ALTER TABLE user_links ADD COLUMN user_key TEXT", () => {});
-    database.run("ALTER TABLE user_links ADD COLUMN parent_user_id INTEGER", () => {});
-    database.run("ALTER TABLE user_links ADD COLUMN student_user_id INTEGER", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS subject_hub (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, level TEXT, confidence TEXT, progress INTEGER DEFAULT 0, alert_dismissed INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER)`);
-    database.run("ALTER TABLE subject_hub ADD COLUMN owner_user_id INTEGER", () => {});
-    database.run(`CREATE TABLE IF NOT EXISTS exam_tracker (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, score INTEGER DEFAULT 0, total_score INTEGER DEFAULT 100, status TEXT DEFAULT 'Pending', assigned INTEGER DEFAULT 0, timer_seconds INTEGER DEFAULT 0, max_time_minutes INTEGER DEFAULT 90, alert_dismissed INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER)`);
-    database.run("ALTER TABLE exam_tracker ADD COLUMN owner_user_id INTEGER", () => {});
-    database.run("ALTER TABLE exam_tracker ADD COLUMN timer_seconds INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE exam_tracker ADD COLUMN max_time_minutes INTEGER DEFAULT 90", () => {});
-    database.run("ALTER TABLE exam_tracker ADD COLUMN is_custom INTEGER DEFAULT 0", () => {});
+    database.run(`CREATE TABLE IF NOT EXISTS exam_tracker (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, score INTEGER DEFAULT 0, total_score INTEGER DEFAULT 100, status TEXT DEFAULT 'Pending', assigned INTEGER DEFAULT 0, timer_seconds INTEGER DEFAULT 0, max_time_minutes INTEGER DEFAULT 90, alert_dismissed INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER, completion_date DATETIME)`);
     database.run("UPDATE exam_tracker SET max_time_minutes = 90 WHERE max_time_minutes IS NULL OR max_time_minutes = 0", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS mistakes_log (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT, category TEXT, photo_url TEXT, status TEXT, revision_id INTEGER, exam_id INTEGER, user_key TEXT, owner_user_id INTEGER)`);
-    database.run("ALTER TABLE mistakes_log ADD COLUMN owner_user_id INTEGER", () => {});
-    database.run("ALTER TABLE mistakes_log ADD COLUMN description TEXT", () => {});
-    database.run("ALTER TABLE mistakes_log ADD COLUMN revision_id INTEGER", () => {});
-    database.run("ALTER TABLE mistakes_log ADD COLUMN exam_id INTEGER", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS uploaded_files (id INTEGER PRIMARY KEY AUTOINCREMENT, mistake_id INTEGER, parent_phone_hash TEXT NOT NULL, month_folder TEXT NOT NULL, relative_path TEXT NOT NULL, original_name TEXT, uploaded_at TEXT NOT NULL, user_key TEXT NOT NULL, owner_user_id INTEGER)`);
-    database.run("ALTER TABLE uploaded_files ADD COLUMN owner_user_id INTEGER", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS teacher_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, month TEXT, subject TEXT, remarks TEXT, score INTEGER, user_key TEXT, owner_user_id INTEGER)`);
-    database.run("ALTER TABLE teacher_feedback ADD COLUMN owner_user_id INTEGER", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS parent_alert_state (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_phone TEXT NOT NULL, alert_type TEXT NOT NULL, alert_ref_id INTEGER NOT NULL, parent_user_id INTEGER, dismissed INTEGER DEFAULT 0, dismissed_progress INTEGER DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(parent_phone, alert_type, alert_ref_id))`);
-    database.run("ALTER TABLE parent_alert_state ADD COLUMN parent_user_id INTEGER", () => {});
-    database.run("ALTER TABLE parent_alert_state ADD COLUMN dismissed_progress INTEGER DEFAULT 0", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS consent_life (id INTEGER PRIMARY KEY AUTOINCREMENT, version TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, consent_json TEXT NOT NULL, created_at TEXT NOT NULL)`);
     database.run(`CREATE TABLE IF NOT EXISTS consent_record (id INTEGER PRIMARY KEY AUTOINCREMENT, user_phone TEXT NOT NULL, user_id INTEGER, role TEXT NOT NULL, consent_life_id INTEGER NOT NULL, accepted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, UNIQUE(user_phone, consent_life_id), FOREIGN KEY(consent_life_id) REFERENCES consent_life(id))`);
     database.run("CREATE INDEX IF NOT EXISTS idx_consent_record_user_phone ON consent_record(user_phone, consent_life_id)");
     database.run(`CREATE TABLE IF NOT EXISTS user_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE, user_key TEXT NOT NULL, user_id INTEGER, role TEXT NOT NULL, logged_in_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, ended_at TEXT, duration_seconds INTEGER DEFAULT 0, end_reason TEXT)`);
     database.run("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_key ON user_sessions(user_key, logged_in_at)");
     database.run(`CREATE TABLE IF NOT EXISTS revision_tracker (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, level TEXT, progress INTEGER DEFAULT 0, status TEXT DEFAULT 'Pending', assigned INTEGER DEFAULT 0, timer_seconds INTEGER DEFAULT 0, max_time_minutes INTEGER DEFAULT 90, alert_dismissed INTEGER DEFAULT 0, alert_dismissed_progress INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER, UNIQUE(name, subject, user_key))`);
-    database.run("ALTER TABLE revision_tracker ADD COLUMN owner_user_id INTEGER", () => {});
-    database.run("ALTER TABLE revision_tracker ADD COLUMN level TEXT", () => {});
-    database.run("ALTER TABLE revision_tracker ADD COLUMN alert_dismissed INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE revision_tracker ADD COLUMN alert_dismissed_progress INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE revision_tracker ADD COLUMN timer_seconds INTEGER DEFAULT 0", () => {});
-    database.run("ALTER TABLE revision_tracker ADD COLUMN max_time_minutes INTEGER DEFAULT 90", () => {});
-    database.run("ALTER TABLE revision_tracker ADD COLUMN is_custom INTEGER DEFAULT 0", () => {});
     database.run("UPDATE revision_tracker SET max_time_minutes = 90 WHERE max_time_minutes IS NULL OR max_time_minutes = 0", () => {});
     database.run("UPDATE users SET user_id = rowid WHERE user_id IS NULL", () => {});
     database.run("UPDATE subject_hub SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = subject_hub.user_key) WHERE owner_user_id IS NULL", () => {});
@@ -1356,15 +1325,17 @@ app.post('/api/exams/update', (req, res) => {
   updateExamResult(dataKey);
   });
   function updateExamResult(dataKey) {
-  db.run("UPDATE exam_tracker SET score = ?, total_score = ?, status = ?, timer_seconds = ?, alert_dismissed = 0 WHERE id = ? AND user_key = ?", [score, totalScore, normalizedStatus, Math.max(0, Number(elapsedSeconds) || 0), Number(examId), dataKey], function(err) {
+  const completionDateClause = normalizedStatus === 'Completed' ? "datetime('now')" : 'completion_date';
+  db.run(`UPDATE exam_tracker SET score = ?, total_score = ?, status = ?, timer_seconds = ?, alert_dismissed = 0, completion_date = ${completionDateClause} WHERE id = ? AND user_key IN (?, ?)`, [score, totalScore, normalizedStatus, Math.max(0, Number(elapsedSeconds) || 0), Number(examId), dataKey, String(userKey).trim()], function(err) {
     if (err) return res.status(500).json({ error: err.message });
+    if (this.changes === 0) return res.status(404).json({ error: 'Exam paper was not found for this user, so the score was not saved.' });
     if (normalizedStatus === 'Completed') {
       return clearLinkedParentAlertDismissal('exam', examId, userKey, clearError => {
         if (clearError) return res.status(500).json({ error: clearError.message });
-        res.json({ success: true });
+        res.json({ success: true, updated: this.changes });
       });
     }
-    res.json({ success: true });
+    res.json({ success: true, updated: this.changes });
   });
   }
 });
@@ -1374,7 +1345,7 @@ app.post('/api/exams/update-timer', (req, res) => {
   if (!id || !userKey) return res.status(400).json({ error: 'Missing exam timer parameters.' });
   withStudentDataKey(userKey, (keyError, dataKey) => {
   if (keyError) return res.status(500).json({ error: keyError.message });
-  db.run("UPDATE exam_tracker SET timer_seconds = ? WHERE id = ? AND user_key = ? AND CAST(assigned AS INTEGER) = 1", [Math.max(0, Number(elapsedSeconds) || 0), Number(id), dataKey], function(err) {
+  db.run("UPDATE exam_tracker SET timer_seconds = ? WHERE id = ? AND user_key IN (?, ?) AND CAST(assigned AS INTEGER) = 1", [Math.max(0, Number(elapsedSeconds) || 0), Number(id), dataKey, String(userKey).trim()], function(err) {
     if (err) return res.status(500).json({ error: err.message });
     res.json({ success: true, updated: this.changes });
   });
@@ -1456,7 +1427,7 @@ app.post('/api/dashboard', (req, res) => {
       if (keyError) return res.status(500).json({ error: keyError.message });
     getExamRows(targetPhone, (err, examRows) => {
       const rawExams = examRows || [];
-      const exams = rawExams.map(row => ({ id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key }));
+      const exams = rawExams.map(row => ({ id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key, completionDate: row.completion_date }));
 
       db.all("SELECT * FROM teacher_feedback WHERE user_key = ?", [dataKey], (feedbackErr, feedbackRows) => {
         const feedback = feedbackRows || [];
