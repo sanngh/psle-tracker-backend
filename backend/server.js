@@ -64,6 +64,60 @@ const authLookupLimiter = rateLimit({
 app.use('/api/auth/check', authLookupLimiter);
 app.use('/api/auth/pin/verify', authLookupLimiter);
 
+// Endpoints reachable without a session token: identity lookup, account creation, PIN setup/status,
+// and the PIN-verify call that mints the session token itself. Admin routes use their own token check.
+const PUBLIC_API_PATHS = new Set([
+  '/auth/check',
+  '/auth/onboard',
+  '/auth/pin/setup',
+  '/auth/pin/status',
+  '/auth/pin/verify',
+  '/syllabus',
+  '/consent',
+  '/consent/status',
+  '/consent/child-status',
+  '/links/create'
+]);
+// Body fields that represent "the account making this request" across different endpoints.
+const SESSION_OWNER_FIELDS = ['userKey', 'userPhone', 'requesterUserKey', 'parentUserKey'];
+
+// Requires a valid, still-active session token (Authorization: Bearer <sessionId>) issued at PIN
+// verification, and confirms the caller's own phone number is the one they're acting as in the body.
+const requireSessionAuth = (req, res, next) => {
+  if (req.path.startsWith('/admin/') || PUBLIC_API_PATHS.has(req.path)) return next();
+
+  const token = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!token) return res.status(401).json({ error: 'Authentication required. Please log in again.' });
+
+  db.get('SELECT user_key FROM user_sessions WHERE session_id = ? AND ended_at IS NULL', [token], (err, session) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!session) return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
+
+    req.authUserKey = session.user_key;
+    const claimedOwners = SESSION_OWNER_FIELDS
+      .map(field => req.body?.[field])
+      .filter(Boolean)
+      .map(value => String(value).trim());
+    if (claimedOwners.length > 0 && !claimedOwners.includes(session.user_key)) {
+      return res.status(403).json({ error: 'You are not authorized to act on behalf of this account.' });
+    }
+    next();
+  });
+};
+app.use('/api', requireSessionAuth);
+
+// Dedicated limiter for photo evidence uploads, keyed by IP+userKey so one account can't
+// flood storage/DB even from a rotating IP, and one IP can't flood many accounts either.
+const uploadLimiter = rateLimit({
+  windowMs: config.uploadRateLimitWindowMs,
+  max: config.uploadRateLimitMaxRequests,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${String(req.body?.userKey || '').trim()}`,
+  message: { error: 'Too many photo uploads. Please wait before retrying.' }
+});
+app.use('/api/errors/log-with-photo', uploadLimiter);
+
 const uploadsDir = config.uploadsDir;
 if (mediaStorage.provider === 'local' && !fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -77,7 +131,13 @@ app.use('/uploads', express.static(uploadsDir, {
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: config.maxUploadBytes }
+  limits: { fileSize: config.maxUploadBytes },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype || !file.mimetype.startsWith('image/')) {
+      return cb(new Error('Only image files are allowed.'));
+    }
+    cb(null, true);
+  }
 });
 
 const dbPath = config.dbPath;
@@ -394,14 +454,12 @@ app.post('/api/profile/avatar', (req, res) => {
   });
 });
 
-app.post('/api/sessions/start', (req, res) => {
-  const cleanPhone = String(req.body?.userKey || '').trim();
-  const requestedRole = String(req.body?.role || '').trim().toLowerCase();
-  if (!cleanPhone) return res.status(400).json({ error: 'User key is required.' });
-
+// Mints a new session token for a user, closing out any prior active session for that account.
+// Used both right after a successful PIN verification and by the /sessions/start resume endpoint.
+function createUserSession(cleanPhone, requestedRole, callback) {
   db.get('SELECT user_id, role FROM users WHERE phone = ?', [cleanPhone], (userError, user) => {
-    if (userError) return res.status(500).json({ error: userError.message });
-    if (!user) return res.status(404).json({ error: 'User not found.' });
+    if (userError) return callback(userError);
+    if (!user) return callback({ status: 404, message: 'User not found.' });
 
     const role = ['parent', 'student'].includes(requestedRole) ? requestedRole : (user.role || 'student');
     const sessionId = crypto.randomUUID();
@@ -410,17 +468,35 @@ app.post('/api/sessions/start', (req, res) => {
       "UPDATE user_sessions SET ended_at = last_seen_at, duration_seconds = MAX(0, CAST((julianday(last_seen_at) - julianday(logged_in_at)) * 86400 AS INTEGER)), end_reason = 'replaced' WHERE user_key = ? AND ended_at IS NULL",
       [cleanPhone],
       function(closeError) {
-        if (closeError) return res.status(500).json({ error: closeError.message });
+        if (closeError) return callback(closeError);
         db.run(
           'INSERT INTO user_sessions (session_id, user_key, user_id, role, logged_in_at, last_seen_at, duration_seconds) VALUES (?, ?, ?, ?, ?, ?, 0)',
           [sessionId, cleanPhone, user.user_id || null, role, loggedInAt, loggedInAt],
           function(insertError) {
-            if (insertError) return res.status(500).json({ error: insertError.message });
-            res.json({ success: true, sessionId, loggedInAt });
+            if (insertError) return callback(insertError);
+            callback(null, { sessionId, loggedInAt });
           }
         );
       }
     );
+  });
+}
+
+app.post('/api/sessions/start', (req, res) => {
+  const cleanPhone = String(req.body?.userKey || '').trim();
+  const requestedRole = String(req.body?.role || '').trim().toLowerCase();
+  if (!cleanPhone) return res.status(400).json({ error: 'User key is required.' });
+
+  // Reuse the active session minted at login (onboard/pin-verify) instead of replacing it here:
+  // this endpoint only tracks app-usage duration and must not invalidate the caller's auth token.
+  db.get('SELECT session_id, logged_in_at FROM user_sessions WHERE user_key = ? AND ended_at IS NULL ORDER BY logged_in_at DESC LIMIT 1', [cleanPhone], (lookupErr, existing) => {
+    if (lookupErr) return res.status(500).json({ error: lookupErr.message });
+    if (existing) return res.json({ success: true, sessionId: existing.session_id, loggedInAt: existing.logged_in_at });
+
+    createUserSession(cleanPhone, requestedRole, (err, result) => {
+      if (err) return res.status(err.status || 500).json({ error: err.message });
+      res.json({ success: true, sessionId: result.sessionId, loggedInAt: result.loggedInAt });
+    });
   });
 });
 
@@ -723,12 +799,15 @@ app.post('/api/auth/onboard', (req, res) => {
           return;
         }
         if (linkedParentPhone && requestedRole === 'student') {
-          db.get('SELECT user_id FROM users WHERE phone = ?', [cleanPhone], (studentErr, studentRow) => {
-            if (studentErr) return res.status(500).json({ error: studentErr.message });
-            const linkUserKey = `family-${studentRow.user_id}`;
-            db.run("INSERT OR IGNORE INTO user_links (parent_phone, student_phone, user_key, created_at) VALUES (?, ?, ?, ?)", [linkedParentPhone, cleanPhone, linkUserKey, createdAt], function(linkErr) {
-              if (linkErr) return res.status(500).json({ error: linkErr.message });
-              seedOnboarding();
+          ensureUserRole(linkedParentPhone, 'parent', (parentErr) => {
+            if (parentErr) return res.status(500).json({ error: parentErr.message });
+            db.get('SELECT user_id FROM users WHERE phone = ?', [cleanPhone], (studentErr, studentRow) => {
+              if (studentErr) return res.status(500).json({ error: studentErr.message });
+              const linkUserKey = `family-${studentRow.user_id}`;
+              db.run("INSERT OR IGNORE INTO user_links (parent_phone, student_phone, user_key, created_at) VALUES (?, ?, ?, ?)", [linkedParentPhone, cleanPhone, linkUserKey, createdAt], function(linkErr) {
+                if (linkErr) return res.status(500).json({ error: linkErr.message });
+                seedOnboarding();
+              });
             });
           });
         } else {
@@ -742,7 +821,15 @@ app.post('/api/auth/onboard', (req, res) => {
           if (keyError) return res.status(500).json({ error: keyError.message });
           const stmt = db.prepare("INSERT INTO subject_hub (name, subject, level, confidence, progress, alert_dismissed, user_key) VALUES (?, ?, ?, 'Low', 0, 0, ?)");
           selectedTopics.forEach(topic => stmt.run(topic.name, topic.subject, topic.level, dataKey));
-          stmt.finalize(() => res.json({ success: true, role: resolvedRole }));
+          stmt.finalize(() => {
+            createUserSession(cleanPhone, resolvedRole, (sessionErr, session) => {
+              if (sessionErr) return res.status(sessionErr.status || 500).json({ error: sessionErr.message || 'Unable to start session.' });
+              // Only the phone that onboarded gets a session here; the linked family member
+              // authenticates independently via their own PIN so their active session isn't replaced.
+              const sessions = { [cleanPhone]: session.sessionId };
+              res.json({ success: true, role: resolvedRole, sessionId: session.sessionId, loggedInAt: session.loggedInAt, sessions });
+            });
+          });
         });
       };
     });
@@ -771,7 +858,10 @@ app.post('/api/auth/pin/setup', (req, res) => {
       [pinHash, salt, cleanPhone],
       function(updateErr) {
         if (updateErr) return res.status(500).json({ error: updateErr.message });
-        res.json({ success: true });
+        createUserSession(cleanPhone, '', (sessionErr, session) => {
+          if (sessionErr) return res.status(sessionErr.status || 500).json({ error: sessionErr.message || 'Unable to start session.' });
+          res.json({ success: true, sessionId: session.sessionId, loggedInAt: session.loggedInAt });
+        });
       }
     );
   });
@@ -807,7 +897,10 @@ app.post('/api/auth/pin/verify', (req, res) => {
     if (matches) {
       return db.run('UPDATE users SET pin_failed_attempts = 0 WHERE phone = ?', [cleanPhone], (resetErr) => {
         if (resetErr) return res.status(500).json({ error: resetErr.message });
-        res.json({ success: true });
+        createUserSession(cleanPhone, '', (sessionErr, session) => {
+          if (sessionErr) return res.status(sessionErr.status || 500).json({ error: sessionErr.message || 'Unable to start session.' });
+          res.json({ success: true, sessionId: session.sessionId, loggedInAt: session.loggedInAt });
+        });
       });
     }
 
@@ -862,6 +955,9 @@ app.post('/api/links/create', (req, res) => {
             if (seedError) return res.status(500).json({ error: seedError.message });
             db.all('SELECT id, parent_phone, student_phone, user_key, created_at FROM user_links WHERE student_phone = ? ORDER BY created_at DESC', [studentPhone], (lookupErr, rows) => {
               if (lookupErr) return res.status(500).json({ error: lookupErr.message });
+              // Don't mint sessions here: the parent calling this already has one, and the
+              // student may be logged in on their own device — minting a new one would
+              // invalidate that active session with no way to deliver the replacement to them.
               res.json({ success: true, parentRole: resolvedParentRole, studentRole: resolvedStudentRole, created: this.changes > 0, linkedParents: rows || [] });
             });
           });
@@ -1651,7 +1747,12 @@ app.post('/api/dashboard', (req, res) => {
   });
 });
 
-app.post('/api/errors/log-with-photo', upload.single('photo'), async (req, res) => {
+app.post('/api/errors/log-with-photo', (req, res, next) => {
+  upload.single('photo')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Photo upload rejected.' });
+    next();
+  });
+}, async (req, res) => {
   const { title, description, category, revisionId, examId, userKey } = req.body;
   if (!req.file) return res.status(400).json({ error: "Photo snapshot file buffer missing." });
   if (!userKey || !title || !description) return res.status(400).json({ error: "Photo keyword, description, and parent phone are required." });
@@ -1662,6 +1763,17 @@ app.post('/api/errors/log-with-photo', upload.single('photo'), async (req, res) 
   }
 
   const cleanPhone = userKey.trim();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const quotaExceeded = await new Promise((resolve, reject) => {
+    db.get("SELECT COUNT(*) AS count FROM uploaded_files WHERE user_key = ? AND uploaded_at >= ?", [cleanPhone, since], (err, row) => {
+      if (err) return reject(err);
+      resolve((row?.count || 0) >= config.maxUploadsPerUserPerDay);
+    });
+  }).catch((err) => { console.error('Upload quota check failed:', err.message); return false; });
+  if (quotaExceeded) {
+    return res.status(429).json({ error: 'Daily photo upload limit reached. Please try again tomorrow.' });
+  }
+
   const parentPhoneHash = crypto.createHash('sha256').update(cleanPhone).digest('hex');
   const uploadedAt = new Date();
   const monthFolder = `${uploadedAt.getFullYear()}-${String(uploadedAt.getMonth() + 1).padStart(2, '0')}`;

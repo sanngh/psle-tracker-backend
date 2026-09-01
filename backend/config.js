@@ -110,7 +110,10 @@ const config = {
   nodeEnv: runtimeEnv,
   env: runtimeEnv,
   port: asInteger(process.env.PORT, 3000),
-  trustProxy: asBoolean(process.env.TRUST_PROXY, false),
+  // Number of reverse proxy hops in front of this app (e.g. 1 for Cloud Run's load balancer).
+  // Never use `true`, which trusts a client-supplied X-Forwarded-For header unconditionally
+  // and lets attackers spoof their IP to bypass rate limiting.
+  trustProxy: asBoolean(process.env.TRUST_PROXY, false) ? asInteger(process.env.TRUST_PROXY_HOPS, 1) : false,
   requireEvidenceLinking: asBoolean(process.env.REQUIRE_EVIDENCE_LINKING, true),
   databaseProvider,
   useSqlite: databaseProvider === 'sqlite',
@@ -123,7 +126,10 @@ const config = {
   authRateLimitWindowMs: asInteger(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 10 * 60 * 1000),
   authRateLimitMaxRequests: asInteger(process.env.AUTH_RATE_LIMIT_MAX_REQUESTS, 10),
   maxJsonPayloadBytes: process.env.MAX_JSON_PAYLOAD_BYTES || '1mb',
-  maxUploadBytes: parseByteSize(process.env.MAX_UPLOAD_BYTES, 100 * 1024 * 1024),
+  maxUploadBytes: parseByteSize(process.env.MAX_UPLOAD_BYTES, 15 * 1024 * 1024),
+  uploadRateLimitWindowMs: asInteger(process.env.UPLOAD_RATE_LIMIT_WINDOW_MS, 60 * 60 * 1000),
+  uploadRateLimitMaxRequests: asInteger(process.env.UPLOAD_RATE_LIMIT_MAX_REQUESTS, 20),
+  maxUploadsPerUserPerDay: asInteger(process.env.MAX_UPLOADS_PER_USER_PER_DAY, 50),
   revisionLevels: parseRevisionLevels(process.env.REVISION_LEVELS),
   confidenceLevels: parseConfidenceLevels(process.env.CONFIDENCE_LEVELS),
   keywordTagLimit: asInteger(process.env.KEYWORD_TAG_LIMIT, 3),
