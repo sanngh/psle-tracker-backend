@@ -1417,6 +1417,11 @@ function getExamRows(userKey, callback) {
   });
 }
 
+// Maps a raw exam_tracker row into the camelCase shape the frontend expects (title/totalScore/completionDate/alGrade).
+function mapExamRow(row) {
+  return { id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key, completionDate: row.completion_date };
+}
+
 app.post('/api/dashboard', (req, res) => {
   const { userKey, profileType } = req.body;
   if (!userKey) return res.status(400).json({ error: "Missing userKey parameters token." });
@@ -1427,7 +1432,7 @@ app.post('/api/dashboard', (req, res) => {
       if (keyError) return res.status(500).json({ error: keyError.message });
     getExamRows(targetPhone, (err, examRows) => {
       const rawExams = examRows || [];
-      const exams = rawExams.map(row => ({ id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key, completionDate: row.completion_date }));
+      const exams = rawExams.map(mapExamRow);
 
       db.all("SELECT * FROM teacher_feedback WHERE user_key = ?", [dataKey], (feedbackErr, feedbackRows) => {
         const feedback = feedbackRows || [];
@@ -1633,7 +1638,7 @@ app.post('/api/dashboard', (req, res) => {
       withStudentDataKey(childPhone, (keyError, dataKey) => {
         if (keyError) return collectChildData();
       getExamRows(childPhone, (examErr, childExams) => {
-        if (!examErr) parentExams.push(...(childExams || []).map(row => ({ ...row, user_key: childPhone })));
+        if (!examErr) parentExams.push(...(childExams || []).map(row => ({ ...mapExamRow(row), user_key: childPhone })));
 
         db.all('SELECT * FROM subject_hub WHERE user_key IN (?, ?)', [dataKey, childPhone], (hubErr, childSyllabus) => {
           if (!hubErr) parentSyllabus.push(...(childSyllabus || []).map(row => ({ ...row, user_key: childPhone })));
@@ -1679,7 +1684,7 @@ app.post('/api/dashboard', (req, res) => {
     };
 
     getExamRows(cleanPhone, (selfExamErr, selfExams) => {
-      if (!selfExamErr) parentExams.push(...(selfExams || []).map(row => ({ ...row, user_key: cleanPhone })));
+      if (!selfExamErr) parentExams.push(...(selfExams || []).map(row => ({ ...mapExamRow(row), user_key: cleanPhone })));
       db.all('SELECT * FROM subject_hub WHERE user_key = ?', [cleanPhone], (selfHubErr, selfSyllabus) => {
         if (!selfHubErr) parentSyllabus.push(...(selfSyllabus || []).map(row => ({ ...row, user_key: cleanPhone })));
         getRevisionTopics(cleanPhone, (selfRevisionErr, selfRevision) => {
