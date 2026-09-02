@@ -286,7 +286,7 @@ const initializeDatabaseSchema = (database) => {
     database.run(`CREATE TABLE IF NOT EXISTS users (phone TEXT PRIMARY KEY, user_id INTEGER UNIQUE, created_at TEXT, role TEXT DEFAULT 'student', blocked INTEGER DEFAULT 0, pin_hash TEXT, pin_salt TEXT, pin_failed_attempts INTEGER DEFAULT 0, pin_locked INTEGER DEFAULT 0, avatar TEXT)`);
     database.run(`CREATE TABLE IF NOT EXISTS user_links (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_phone TEXT NOT NULL, student_phone TEXT NOT NULL, user_key TEXT, parent_user_id INTEGER, student_user_id INTEGER, created_at TEXT NOT NULL, UNIQUE(parent_phone, student_phone))`);
     database.run(`CREATE TABLE IF NOT EXISTS subject_hub (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, level TEXT, confidence TEXT, progress INTEGER DEFAULT 0, alert_dismissed INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER)`);
-    database.run(`CREATE TABLE IF NOT EXISTS exam_tracker (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, score INTEGER DEFAULT 0, total_score INTEGER DEFAULT 100, status TEXT DEFAULT 'Pending', assigned INTEGER DEFAULT 0, timer_seconds INTEGER DEFAULT 0, max_time_minutes INTEGER DEFAULT 90, alert_dismissed INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER, completion_date DATETIME)`);
+    database.run(`CREATE TABLE IF NOT EXISTS exam_tracker (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, score INTEGER DEFAULT 0, total_score INTEGER DEFAULT 100, status TEXT DEFAULT 'Pending', assigned INTEGER DEFAULT 0, timer_seconds INTEGER DEFAULT 0, max_time_minutes INTEGER DEFAULT 90, alert_dismissed INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER, completion_date DATETIME, paper_type TEXT DEFAULT 'Paper1')`);
     database.run("UPDATE exam_tracker SET max_time_minutes = 90 WHERE max_time_minutes IS NULL OR max_time_minutes = 0", () => {});
     database.run(`CREATE TABLE IF NOT EXISTS mistakes_log (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT, category TEXT, photo_url TEXT, status TEXT, revision_id INTEGER, exam_id INTEGER, user_key TEXT, owner_user_id INTEGER)`);
     database.run(`CREATE TABLE IF NOT EXISTS uploaded_files (id INTEGER PRIMARY KEY AUTOINCREMENT, mistake_id INTEGER, parent_phone_hash TEXT NOT NULL, month_folder TEXT NOT NULL, relative_path TEXT NOT NULL, original_name TEXT, uploaded_at TEXT NOT NULL, user_key TEXT NOT NULL, owner_user_id INTEGER)`);
@@ -701,7 +701,8 @@ function seedStudentBanks(studentPhone, callback) {
         const seedExams = (index) => {
           if (index >= examBank.length) return seedRevisions(0);
           const exam = examBank[index];
-          db.run("INSERT INTO exam_tracker (name, subject, score, total_score, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, is_custom, user_key) SELECT ?, ?, 0, 100, 'Pending', 0, 0, 90, 0, 0, ? WHERE NOT EXISTS (SELECT 1 FROM exam_tracker WHERE name = ? AND subject = ? AND user_key = ?)", [exam.name, exam.subject, dataKey, exam.name, exam.subject, dataKey], seedError => {
+          const seedPaperType = ['Paper1', 'Paper2', 'Custom'].includes(exam.paperType) ? exam.paperType : 'Paper1';
+          db.run("INSERT INTO exam_tracker (name, subject, score, total_score, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, is_custom, user_key, paper_type) SELECT ?, ?, 0, 100, 'Pending', 0, 0, 90, 0, 0, ?, ? WHERE NOT EXISTS (SELECT 1 FROM exam_tracker WHERE name = ? AND subject = ? AND user_key = ?)", [exam.name, exam.subject, dataKey, seedPaperType, exam.name, exam.subject, dataKey], seedError => {
             if (seedError) return callback(seedError);
             seedExams(index + 1);
           });
@@ -967,13 +968,15 @@ app.post('/api/links/parent', (req, res) => {
 });
 
 app.post('/api/exams/add', (req, res) => {
-  const { userKey, name, subject } = req.body;
+  const { userKey, name, subject, paperType } = req.body;
   if (!userKey || !name || !subject) {
     return res.status(400).json({ error: 'Missing exam details.' });
   }
 
   const cleanName = String(name).trim();
   const cleanSubject = String(subject).trim();
+  const validPaperTypes = ['Paper1', 'Paper2', 'Custom'];
+  const cleanPaperType = validPaperTypes.includes(paperType) ? paperType : 'Paper1';
   if (!cleanName || !cleanSubject) {
     return res.status(400).json({ error: 'Exam name and subject are required.' });
   }
@@ -981,11 +984,11 @@ app.post('/api/exams/add', (req, res) => {
   getStudentDataKey(userKey, (keyError, dataKey) => {
   if (keyError) return res.status(500).json({ error: keyError.message });
   db.run(
-    "INSERT INTO exam_tracker (name, subject, score, total_score, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, is_custom, user_key) VALUES (?, ?, 0, 100, 'Pending', 0, 0, 90, 0, 1, ?)",
-    [cleanName, cleanSubject, dataKey],
+    "INSERT INTO exam_tracker (name, subject, score, total_score, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, is_custom, user_key, paper_type) VALUES (?, ?, 0, 100, 'Pending', 0, 0, 90, 0, 1, ?, ?)",
+    [cleanName, cleanSubject, dataKey, cleanPaperType],
     function(err) {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({ success: true, id: this.lastID, name: cleanName, subject: cleanSubject });
+      res.json({ success: true, id: this.lastID, name: cleanName, subject: cleanSubject, paperType: cleanPaperType });
     }
   );
   });
@@ -1419,7 +1422,7 @@ function getExamRows(userKey, callback) {
 
 // Maps a raw exam_tracker row into the camelCase shape the frontend expects (title/totalScore/completionDate/alGrade).
 function mapExamRow(row) {
-  return { id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key, completionDate: row.completion_date };
+  return { id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key, completionDate: row.completion_date, paperType: row.paper_type || 'Paper1' };
 }
 
 app.post('/api/dashboard', (req, res) => {
