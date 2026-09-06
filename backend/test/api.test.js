@@ -26,8 +26,41 @@ const { app, db } = require('../server');
 const { createMediaStorage } = require('../mediaStorage');
 let server;
 
-async function request(endpoint, options) {
-  return fetch(`${baseUrl}${endpoint}`, options);
+// Auth session tokens are minted by /auth/onboard, /auth/pin/setup, and /auth/pin/verify.
+// Cache them by owning phone number so every subsequent test request can attach the right
+// Authorization header automatically, without every call site needing to manage tokens.
+const sessionTokenByUser = new Map();
+const SESSION_OWNER_FIELDS = ['userKey', 'userPhone', 'requesterUserKey', 'parentUserKey'];
+
+async function request(endpoint, options = {}) {
+  const body = options.body;
+  let ownerKey;
+  if (typeof body === 'string') {
+    try {
+      const parsed = JSON.parse(body);
+      ownerKey = SESSION_OWNER_FIELDS.map(field => parsed?.[field]).find(Boolean);
+    } catch (e) { /* not JSON, e.g. multipart form data */ }
+  }
+  const headers = { ...(options.headers || {}) };
+  if (ownerKey && sessionTokenByUser.has(String(ownerKey).trim()) && !headers.Authorization) {
+    headers.Authorization = `Bearer ${sessionTokenByUser.get(String(ownerKey).trim())}`;
+  }
+
+  const response = await fetch(`${baseUrl}${endpoint}`, { ...options, headers });
+
+  const cloned = response.clone();
+  const data = await cloned.json().catch(() => null);
+  if (data?.sessionId && ownerKey) {
+    sessionTokenByUser.set(String(ownerKey).trim(), data.sessionId);
+  }
+  // Some endpoints (onboard, links/create) mint sessions for more than one phone at once
+  // (e.g. the linked family member), so cache every token they hand back.
+  if (data?.sessions && typeof data.sessions === 'object') {
+    for (const [phone, token] of Object.entries(data.sessions)) {
+      if (phone && token) sessionTokenByUser.set(String(phone).trim(), token);
+    }
+  }
+  return response;
 }
 
 async function jsonRequest(endpoint, body) {
@@ -76,6 +109,37 @@ test('cloud providers require their account settings only when selected', () => 
   const r2Errors = config.validateCloudProviderSettings({ databaseProvider: 'sqlite', mediaStorageProvider: 'r2' });
   assert.match(r2Errors[0], /R2_ACCOUNT_ID/);
   assert.match(r2Errors[0], /R2_PUBLIC_BASE_URL/);
+});
+
+test('runtime env values override .env and .env.dev when the app is explicitly configured', () => {
+  const original = {
+    DATABASE_PROVIDER: process.env.DATABASE_PROVIDER,
+    USE_SQLITE: process.env.USE_SQLITE,
+    DB_PATH: process.env.DB_PATH,
+    ADMIN_TOKEN: process.env.ADMIN_TOKEN
+  };
+
+  try {
+    process.env.DATABASE_PROVIDER = 'sqlite';
+    process.env.USE_SQLITE = 'true';
+    process.env.DB_PATH = path.join(testRoot, 'runtime-override.db');
+    process.env.ADMIN_TOKEN = 'test-owner-token';
+
+    delete require.cache[require.resolve('../config')];
+    const runtimeConfig = require('../config');
+
+    assert.equal(runtimeConfig.databaseProvider, 'sqlite');
+    assert.equal(runtimeConfig.useSqlite, true);
+    assert.equal(runtimeConfig.dbPath, process.env.DB_PATH);
+  } finally {
+    Object.entries(original).forEach(([key, value]) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    });
+    delete require.cache[require.resolve('../config')];
+    const freshConfig = require('../config');
+    assert.equal(freshConfig.databaseProvider, 'sqlite');
+  }
 });
 
 test('local media provider writes files and builds upload URLs', async () => {
@@ -286,6 +350,14 @@ test('parent can explicitly link a student after the student already registered'
   });
   assert.equal(linkResponse.status, 200);
 
+  // The parent authenticates independently (no cross-session minting) to get their own token.
+  await jsonRequest('/auth/onboard', {
+    userKey: parentPhone,
+    selectedTopics: [{ name: 'Linked parent onboarding', subject: 'Mathematics', level: 'P6' }],
+    role: 'parent',
+    studentUserKey: studentPhone
+  });
+
   const childrenResponse = await jsonRequest('/links/children', { userKey: parentPhone });
   assert.equal(childrenResponse.status, 200);
   const linkedChildren = await childrenResponse.json();
@@ -340,6 +412,14 @@ test('parent onboarding can create and link a student in one request', async () 
   const links = await parentLinks.json();
   assert.ok(links.some(link => link.student_phone === studentPhone && /^family-\d+$/.test(link.user_key)));
 
+  // The student authenticates independently (no cross-session minting) to get their own token.
+  await jsonRequest('/auth/onboard', {
+    userKey: studentPhone,
+    selectedTopics: [{ name: 'Combined onboarding student topic', subject: 'Science', level: 'P6' }],
+    role: 'student',
+    parentUserKey: parentPhone
+  });
+
   const studentDashboard = await jsonRequest('/dashboard', { userKey: studentPhone, profileType: 'student' });
   assert.equal(studentDashboard.status, 200);
   const studentData = await studentDashboard.json();
@@ -371,8 +451,7 @@ test('linked phones resolve to parent and student roles from the relationship', 
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhone,
-    selectedTopics: [{ name: 'Role link parent', subject: 'Science', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Role link parent', subject: 'Science', level: 'P6' }]
   });
   await jsonRequest('/links/create', { parentUserKey: parentPhone, studentUserKey: studentPhone });
 
@@ -452,6 +531,13 @@ test('linked parent receives a syllabus completion alert', async () => {
     studentUserKey: studentPhone,
     selectedTopics: [{ name: 'Linked syllabus alert parent', subject: 'Science', level: 'P6' }]
   });
+  // The student authenticates independently (no cross-session minting) to get their own token.
+  await jsonRequest('/auth/onboard', {
+    userKey: studentPhone,
+    role: 'student',
+    parentUserKey: parentPhone,
+    selectedTopics: [{ name: 'Linked syllabus alert student', subject: 'Science', level: 'P6' }]
+  });
 
   const studentDashboard = await jsonRequest('/dashboard', { userKey: studentPhone, profileType: 'student' });
   const topic = (await studentDashboard.json()).syllabusProgress[0];
@@ -480,6 +566,13 @@ test('linked parent receives a syllabus 75 percent alert with confidence', async
     selectedTopics: [{ name: 'Linked syllabus 75 topic', subject: 'Science', level: 'P6' }]
   });
   assert.equal(onboarding.status, 200);
+  // The student authenticates independently (no cross-session minting) to get their own token.
+  await jsonRequest('/auth/onboard', {
+    userKey: studentPhone,
+    role: 'student',
+    parentUserKey: parentPhone,
+    selectedTopics: [{ name: 'Linked syllabus 75 student topic', subject: 'Science', level: 'P6' }]
+  });
 
   const studentDashboard = await jsonRequest('/dashboard', { userKey: studentPhone, profileType: 'student' });
   const topic = (await studentDashboard.json()).syllabusProgress[0];
@@ -505,6 +598,10 @@ test('parent dashboard includes default revision bank before assignment', async 
     role: 'student'
   });
   assert.equal(onboarding.status, 200);
+  await jsonRequest('/auth/onboard', {
+    userKey: parentUserKey,
+    selectedTopics: [{ name: 'Default revision visibility parent trigger', subject: 'Science', level: 'P6' }]
+  });
   assert.equal((await jsonRequest('/links/create', { parentUserKey, studentUserKey })).status, 200);
 
   const dashboard = await jsonRequest('/dashboard', { userKey: parentUserKey, profileType: 'parent' });
@@ -523,6 +620,10 @@ test('parent dashboard includes default prelim paper bank before assignment', as
     role: 'student'
   });
   assert.equal(onboarding.status, 200);
+  await jsonRequest('/auth/onboard', {
+    userKey: parentUserKey,
+    selectedTopics: [{ name: 'Default exam visibility parent trigger', subject: 'Science', level: 'P6' }]
+  });
   assert.equal((await jsonRequest('/links/create', { parentUserKey, studentUserKey })).status, 200);
 
   const dashboard = await jsonRequest('/dashboard', { userKey: parentUserKey, profileType: 'parent' });
@@ -534,6 +635,10 @@ test('parent dashboard includes default prelim paper bank before assignment', as
 
 test('parent assigns revision and student progress raises dismissible milestone alerts', async () => {
   const parentUserKey = '71234569';
+  await jsonRequest('/auth/onboard', {
+    userKey: parentUserKey,
+    selectedTopics: [{ name: 'Parent assign trigger', subject: 'Science', level: 'P6' }]
+  });
   assert.equal((await jsonRequest('/links/create', { parentUserKey, studentUserKey: userKey })).status, 200);
   const parentDashboard = await jsonRequest('/dashboard', { userKey: parentUserKey, profileType: 'parent' });
   const parentData = await parentDashboard.json();
@@ -588,6 +693,10 @@ test('parent assigns revision and student progress raises dismissible milestone 
 
 test('linked mistake evidence unlocks revision and exam completion', async () => {
   const parentUserKey = '71234570';
+  await jsonRequest('/auth/onboard', {
+    userKey: parentUserKey,
+    selectedTopics: [{ name: 'Mistake evidence parent trigger', subject: 'Science', level: 'P6' }]
+  });
   assert.equal((await jsonRequest('/links/create', { parentUserKey, studentUserKey: userKey })).status, 200);
   const revisionDashboard = await jsonRequest('/dashboard', { userKey: parentUserKey, profileType: 'parent' });
   const revision = (await revisionDashboard.json()).revisionTopics[0];
@@ -703,8 +812,7 @@ test('parent dashboard aggregates alerts from linked student syllabus, revision 
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhone,
-    selectedTopics: [{ name: 'Parent dashboard link trigger', subject: 'Science', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Parent dashboard link trigger', subject: 'Science', level: 'P6' }]
   });
 
   await jsonRequest('/auth/onboard', {
@@ -751,8 +859,7 @@ test('linked parent receives an alert when student completes an assigned prelim'
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhone,
-    selectedTopics: [{ name: 'Prelim alert parent', subject: 'Science', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Prelim alert parent', subject: 'Science', level: 'P6' }]
   });
   await jsonRequest('/auth/onboard', {
     userKey: studentPhone,
@@ -804,8 +911,7 @@ test('student receives an assigned prelim under Targets Owed without a separate 
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhone,
-    selectedTopics: [{ name: 'Prelim assignment parent', subject: 'Science', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Prelim assignment parent', subject: 'Science', level: 'P6' }]
   });
   await jsonRequest('/auth/onboard', {
     userKey: studentPhone,
@@ -833,8 +939,7 @@ test('parent dismissals clear linked child alerts and dismiss-all clears linked 
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhone,
-    selectedTopics: [{ name: 'Parent dismissal link trigger', subject: 'Math', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Parent dismissal link trigger', subject: 'Math', level: 'P6' }]
   });
 
   await jsonRequest('/auth/onboard', {
@@ -891,14 +996,12 @@ test('linked parents cannot assign the same revision topic twice', async () => {
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhoneA,
-    selectedTopics: [{ name: 'Parent A shared assignment', subject: 'Math', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Parent A shared assignment', subject: 'Math', level: 'P6' }]
   });
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhoneB,
-    selectedTopics: [{ name: 'Parent B shared assignment', subject: 'Math', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Parent B shared assignment', subject: 'Math', level: 'P6' }]
   });
 
   await jsonRequest('/auth/onboard', {
@@ -941,14 +1044,12 @@ test('two linked parents dismiss alerts independently', async () => {
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhoneA,
-    selectedTopics: [{ name: 'Parent A dismissal link', subject: 'Math', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Parent A dismissal link', subject: 'Math', level: 'P6' }]
   });
 
   await jsonRequest('/auth/onboard', {
     userKey: parentPhoneB,
-    selectedTopics: [{ name: 'Parent B dismissal link', subject: 'Math', level: 'P6' }],
-    role: 'parent'
+    selectedTopics: [{ name: 'Parent B dismissal link', subject: 'Math', level: 'P6' }]
   });
 
   await jsonRequest('/auth/onboard', {
@@ -1005,7 +1106,11 @@ test('photo uploads use hashed phone and month folders and are retrieved by pare
   form.append('revisionId', '1');
   form.append('photo', new Blob(['test-image'], { type: 'image/jpeg' }), 'mistake.jpg');
 
-  const uploadResponse = await request('/errors/log-with-photo', { method: 'POST', body: form });
+  const uploadResponse = await request('/errors/log-with-photo', {
+    method: 'POST',
+    body: form,
+    headers: { Authorization: `Bearer ${sessionTokenByUser.get(userKey)}` }
+  });
   assert.equal(uploadResponse.status, 200);
   const uploadData = await uploadResponse.json();
   assert.match(uploadData.parentPhoneHash, /^[a-f0-9]{64}$/);
@@ -1109,7 +1214,7 @@ test('only a linked parent or student can unlock a locked PIN, resetting attempt
   await jsonRequest('/auth/onboard', {
     userKey: strangerPhone,
     selectedTopics: [{ name: 'PIN unlock stranger', subject: 'Science', level: 'P6' }],
-    role: 'parent'
+    role: 'student'
   });
   await jsonRequest('/auth/pin/setup', { userKey: studentPhone, pin: '246810', confirmPin: '246810' });
 
@@ -1148,6 +1253,13 @@ test('a linked student can unlock their locked parent account', async () => {
     userKey: strangerPhone,
     selectedTopics: [{ name: 'Reverse unlock stranger', subject: 'Science', level: 'P6' }],
     role: 'student'
+  });
+  // The linked student authenticates independently (no cross-session minting) to get their own token.
+  await jsonRequest('/auth/onboard', {
+    userKey: studentPhone,
+    selectedTopics: [{ name: 'Reverse unlock student', subject: 'Science', level: 'P6' }],
+    role: 'student',
+    parentUserKey: parentPhone
   });
   await jsonRequest('/auth/pin/setup', { userKey: parentPhone, pin: '135791', confirmPin: '135791' });
 
@@ -1191,5 +1303,41 @@ test('linked children list surfaces PIN lock status so a parent can offer to unl
   const linkedChild = children.find(child => child.student_phone === studentPhone);
   assert.ok(linkedChild);
   assert.equal(Number(linkedChild.locked), 1);
+});
+
+test('parent dashboard can target a single linked child and return that selected student', async () => {
+  const parentPhone = '7660011001';
+  const studentPhone = '7660011002';
+
+  await jsonRequest('/auth/onboard', {
+    userKey: parentPhone,
+    selectedTopics: [{ name: 'Single linked child dashboard parent', subject: 'Science', level: 'P6' }],
+    role: 'parent',
+    studentUserKey: studentPhone
+  });
+  await jsonRequest('/auth/onboard', {
+    userKey: studentPhone,
+    selectedTopics: [{ name: 'Single linked child dashboard student', subject: 'Science', level: 'P6' }],
+    role: 'student',
+    parentUserKey: parentPhone
+  });
+
+  const examAdd = await jsonRequest('/exams/add', {
+    userKey: studentPhone,
+    name: 'Single Child Paper',
+    subject: 'Science',
+    paperType: 'Paper1'
+  });
+  assert.equal(examAdd.status, 200);
+
+  const dashboard = await jsonRequest('/dashboard', {
+    userKey: parentPhone,
+    profileType: 'parent',
+    selectedStudentPhone: studentPhone
+  });
+  assert.equal(dashboard.status, 200);
+  const payload = await dashboard.json();
+  assert.equal(payload.selectedStudentPhone, studentPhone);
+  assert.ok(payload.exams.some(exam => exam.name === 'Single Child Paper'));
 });
 

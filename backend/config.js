@@ -3,11 +3,11 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 
 const baseEnvFile = path.resolve(__dirname, '.env');
-if (fs.existsSync(baseEnvFile)) dotenv.config({ path: baseEnvFile });
+if (fs.existsSync(baseEnvFile)) dotenv.config({ path: baseEnvFile, override: false });
 
 const runtimeEnv = (process.env.ENV || process.env.NODE_ENV || 'dev').toLowerCase();
 const runtimeEnvFile = path.resolve(__dirname, `.env.${runtimeEnv}`);
-if (fs.existsSync(runtimeEnvFile)) dotenv.config({ path: runtimeEnvFile, override: true });
+if (fs.existsSync(runtimeEnvFile)) dotenv.config({ path: runtimeEnvFile, override: false });
 
 const asBoolean = (value, fallback = false) => {
   if (value === undefined || value === null || value === '') return fallback;

@@ -42,6 +42,10 @@ app.use(cors({
 app.use(express.json({ limit: config.maxJsonPayloadBytes }));
 app.use(express.urlencoded({ extended: true, limit: config.maxJsonPayloadBytes }));
 
+app.use('/api', (req, res, next) => {
+  next();
+});
+
 const apiLimiter = rateLimit({
   windowMs: config.rateLimitWindowMs,
   max: config.rateLimitMaxRequests,
@@ -294,27 +298,60 @@ const initializeDatabaseSchema = (database) => {
     database.run(`CREATE TABLE IF NOT EXISTS parent_alert_state (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_phone TEXT NOT NULL, alert_type TEXT NOT NULL, alert_ref_id INTEGER NOT NULL, parent_user_id INTEGER, dismissed INTEGER DEFAULT 0, dismissed_progress INTEGER DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(parent_phone, alert_type, alert_ref_id))`);
     database.run(`CREATE TABLE IF NOT EXISTS consent_life (id INTEGER PRIMARY KEY AUTOINCREMENT, version TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, consent_json TEXT NOT NULL, created_at TEXT NOT NULL)`);
     database.run(`CREATE TABLE IF NOT EXISTS consent_record (id INTEGER PRIMARY KEY AUTOINCREMENT, user_phone TEXT NOT NULL, user_id INTEGER, role TEXT NOT NULL, consent_life_id INTEGER NOT NULL, accepted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, UNIQUE(user_phone, consent_life_id), FOREIGN KEY(consent_life_id) REFERENCES consent_life(id))`);
-    database.run("CREATE INDEX IF NOT EXISTS idx_consent_record_user_phone ON consent_record(user_phone, consent_life_id)");
     database.run(`CREATE TABLE IF NOT EXISTS user_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE, user_key TEXT NOT NULL, user_id INTEGER, role TEXT NOT NULL, logged_in_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, ended_at TEXT, duration_seconds INTEGER DEFAULT 0, end_reason TEXT)`);
-    database.run("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_key ON user_sessions(user_key, logged_in_at)");
     database.run(`CREATE TABLE IF NOT EXISTS revision_tracker (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, subject TEXT, level TEXT, progress INTEGER DEFAULT 0, status TEXT DEFAULT 'Pending', assigned INTEGER DEFAULT 0, timer_seconds INTEGER DEFAULT 0, max_time_minutes INTEGER DEFAULT 90, alert_dismissed INTEGER DEFAULT 0, alert_dismissed_progress INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, user_key TEXT, owner_user_id INTEGER, UNIQUE(name, subject, user_key))`);
-    database.run("UPDATE revision_tracker SET max_time_minutes = 90 WHERE max_time_minutes IS NULL OR max_time_minutes = 0", () => {});
-    database.run("UPDATE users SET user_id = rowid WHERE user_id IS NULL", () => {});
-    database.run("UPDATE subject_hub SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = subject_hub.user_key) WHERE owner_user_id IS NULL", () => {});
-    database.run("UPDATE exam_tracker SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = exam_tracker.user_key) WHERE owner_user_id IS NULL", () => {});
-    database.run("UPDATE mistakes_log SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = mistakes_log.user_key) WHERE owner_user_id IS NULL", () => {});
-    database.run("UPDATE uploaded_files SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = uploaded_files.user_key) WHERE owner_user_id IS NULL", () => {});
-    database.run("UPDATE teacher_feedback SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = teacher_feedback.user_key) WHERE owner_user_id IS NULL", () => {});
-    database.run("UPDATE revision_tracker SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = revision_tracker.user_key) WHERE owner_user_id IS NULL", () => {});
-    database.run("UPDATE consent_record SET user_id = (SELECT user_id FROM users WHERE users.phone = consent_record.user_phone) WHERE user_id IS NULL", () => {});
-    database.run("UPDATE user_links SET parent_user_id = (SELECT user_id FROM users WHERE users.phone = user_links.parent_phone), student_user_id = (SELECT user_id FROM users WHERE users.phone = user_links.student_phone) WHERE parent_user_id IS NULL OR student_user_id IS NULL", () => {});
-    database.run("UPDATE user_links SET user_key = 'family-' || student_user_id WHERE user_key IS NULL OR user_key = ''", () => {});
-    database.run("UPDATE parent_alert_state SET parent_user_id = (SELECT user_id FROM users WHERE users.phone = parent_alert_state.parent_phone) WHERE parent_user_id IS NULL", () => {});
+    database.run("CREATE INDEX IF NOT EXISTS idx_consent_record_user_phone ON consent_record(user_phone, consent_life_id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_user_links_parent_phone ON user_links(parent_phone, student_phone)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_user_links_student_phone ON user_links(student_phone, parent_phone)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_exam_tracker_user_alert ON exam_tracker(user_key, alert_dismissed)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_exam_tracker_user_status ON exam_tracker(user_key, status, assigned)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_exam_tracker_user_key_id ON exam_tracker(user_key, id)");
+    database.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_tracker_unique_name_subject_user ON exam_tracker(name, subject, user_key)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_subject_hub_user_alert ON subject_hub(user_key, alert_dismissed)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_subject_hub_user_progress ON subject_hub(user_key, progress)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_subject_hub_user_key_id ON subject_hub(user_key, id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_revision_tracker_user_alert ON revision_tracker(user_key, alert_dismissed)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_revision_tracker_user_assigned ON revision_tracker(user_key, assigned, alert_dismissed)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_revision_tracker_user_key_id ON revision_tracker(user_key, id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_mistakes_log_revision_user ON mistakes_log(revision_id, user_key)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_mistakes_log_exam_user ON mistakes_log(exam_id, user_key)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_mistakes_log_user_key_id ON mistakes_log(user_key, id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_uploaded_files_parent_hash ON uploaded_files(parent_phone_hash, mistake_id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_uploaded_files_user_key_mistake ON uploaded_files(user_key, mistake_id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_teacher_feedback_user_subject ON teacher_feedback(user_key, subject)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_teacher_feedback_user_key_id ON teacher_feedback(user_key, id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_parent_alert_state_parent_dismissed ON parent_alert_state(parent_phone, dismissed)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_parent_alert_state_parent_alert ON parent_alert_state(parent_phone, alert_type, alert_ref_id)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_key ON user_sessions(user_key, logged_in_at)");
+    database.run("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_active ON user_sessions(user_key, ended_at)");
+    // One-time legacy backfill: each of these is a full-table scan (owner_user_id/user_id
+    // have no index to filter on), so they must never run unguarded on every server boot -
+    // that was re-scanning every table on every restart and burning huge Turso row-read counts.
+    // New rows are already covered going forward by the AFTER INSERT triggers below.
+    database.run(`CREATE TABLE IF NOT EXISTS schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+    database.get("SELECT 1 FROM schema_migrations WHERE migration_key = 'owner_id_backfill_v1'", (migErr, migRow) => {
+      if (migErr || migRow) return;
+      database.run("UPDATE revision_tracker SET max_time_minutes = 90 WHERE max_time_minutes IS NULL OR max_time_minutes = 0", () => {});
+      database.run("UPDATE users SET user_id = rowid WHERE user_id IS NULL", () => {});
+      database.run("UPDATE mistakes_log SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = mistakes_log.user_key) WHERE owner_user_id IS NULL", () => {});
+      database.run("UPDATE uploaded_files SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = uploaded_files.user_key) WHERE owner_user_id IS NULL", () => {});
+      database.run("UPDATE teacher_feedback SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = teacher_feedback.user_key) WHERE owner_user_id IS NULL", () => {});
+      database.run("UPDATE revision_tracker SET owner_user_id = (SELECT user_id FROM users WHERE users.phone = revision_tracker.user_key) WHERE owner_user_id IS NULL", () => {});
+      database.run("UPDATE consent_record SET user_id = (SELECT user_id FROM users WHERE users.phone = consent_record.user_phone) WHERE user_id IS NULL", () => {});
+      database.run("UPDATE user_links SET parent_user_id = (SELECT user_id FROM users WHERE users.phone = user_links.parent_phone), student_user_id = (SELECT user_id FROM users WHERE users.phone = user_links.student_phone) WHERE parent_user_id IS NULL OR student_user_id IS NULL", () => {});
+      database.run("UPDATE user_links SET user_key = 'family-' || student_user_id WHERE user_key IS NULL OR user_key = ''", () => {});
+      database.run("UPDATE parent_alert_state SET parent_user_id = (SELECT user_id FROM users WHERE users.phone = parent_alert_state.parent_phone) WHERE parent_user_id IS NULL", () => {});
+      database.run("INSERT OR IGNORE INTO schema_migrations (migration_key, applied_at) VALUES ('owner_id_backfill_v1', ?)", [new Date().toISOString()]);
+    });
     database.run("CREATE TRIGGER IF NOT EXISTS set_user_id_after_insert AFTER INSERT ON users WHEN NEW.user_id IS NULL BEGIN UPDATE users SET user_id = NEW.rowid WHERE phone = NEW.phone; END");
-    database.run("CREATE TRIGGER IF NOT EXISTS set_activity_owner_after_insert AFTER INSERT ON subject_hub WHEN NEW.owner_user_id IS NULL BEGIN UPDATE subject_hub SET owner_user_id = (SELECT user_id FROM users WHERE phone = NEW.user_key) WHERE id = NEW.id; END");
-    database.run("CREATE TRIGGER IF NOT EXISTS set_exam_owner_after_insert AFTER INSERT ON exam_tracker WHEN NEW.owner_user_id IS NULL BEGIN UPDATE exam_tracker SET owner_user_id = (SELECT user_id FROM users WHERE phone = NEW.user_key) WHERE id = NEW.id; END");
-    database.run("CREATE TRIGGER IF NOT EXISTS set_revision_owner_after_insert AFTER INSERT ON revision_tracker WHEN NEW.owner_user_id IS NULL BEGIN UPDATE revision_tracker SET owner_user_id = (SELECT user_id FROM users WHERE phone = NEW.user_key) WHERE id = NEW.id; END");
     database.run("CREATE TRIGGER IF NOT EXISTS set_link_ids_after_insert AFTER INSERT ON user_links BEGIN UPDATE user_links SET parent_user_id = (SELECT user_id FROM users WHERE phone = NEW.parent_phone), student_user_id = (SELECT user_id FROM users WHERE phone = NEW.student_phone), user_key = COALESCE(NEW.user_key, 'family-' || (SELECT user_id FROM users WHERE phone = NEW.student_phone)) WHERE id = NEW.id; END");
+    // owner_user_id is never read anywhere in this codebase, and its backfill subquery is broken
+    // for most rows anyway (user_key is usually 'family-<id>', not a phone). These per-row triggers
+    // were firing on every seeded exam/revision/subject_hub row (300+ times per onboarding) for no
+    // benefit, so they're dropped rather than recreated.
+    database.run("DROP TRIGGER IF EXISTS set_activity_owner_after_insert");
+    database.run("DROP TRIGGER IF EXISTS set_exam_owner_after_insert");
+    database.run("DROP TRIGGER IF EXISTS set_revision_owner_after_insert");
   });
 };
 
@@ -666,20 +703,61 @@ app.get('/api/admin/tables/:tableName', (req, res) => {
   });
 });
 
-function getStudentDataKey(studentPhone, callback) {
+function getStudentDataKey(studentPhone, parentPhone, callback) {
+  if (typeof parentPhone === 'function') {
+    callback = parentPhone;
+    parentPhone = null;
+  }
+
   const cleanPhone = String(studentPhone || '').trim();
-  db.get("SELECT COALESCE((SELECT user_key FROM user_links WHERE student_phone = ? AND user_key IS NOT NULL AND user_key <> '' LIMIT 1), (SELECT user_key FROM user_links WHERE parent_phone = ? AND user_key IS NOT NULL AND user_key <> '' LIMIT 1), phone) AS data_key FROM users WHERE phone = ?", [cleanPhone, cleanPhone, cleanPhone], (err, row) => {
-    if (err) return callback(err);
-    callback(null, row?.data_key || cleanPhone);
+  const cleanParentPhone = String(parentPhone || '').trim();
+  const resolvedParentPhone = cleanParentPhone && cleanParentPhone !== cleanPhone ? cleanParentPhone : '';
+  if (!cleanPhone) return callback(new Error('Student phone number is required.'));
+
+  const familyQuery = resolvedParentPhone
+    ? "SELECT user_key FROM user_links WHERE student_phone = ? AND parent_phone = ? AND user_key IS NOT NULL AND user_key <> '' LIMIT 1"
+    : "SELECT user_key FROM user_links WHERE student_phone = ? AND user_key IS NOT NULL AND user_key <> '' LIMIT 1";
+  const familyParams = resolvedParentPhone ? [cleanPhone, resolvedParentPhone] : [cleanPhone];
+
+  db.get(familyQuery, familyParams, (linkErr, linkRow) => {
+    if (linkErr) return callback(linkErr);
+    if (linkRow?.user_key) return callback(null, linkRow.user_key);
+    callback(null, cleanPhone);
   });
 }
 
-function withStudentDataKey(studentPhone, operation) {
-  getStudentDataKey(studentPhone, (err, dataKey) => {
+function withStudentDataKey(studentPhone, parentPhone, operation) {
+  if (typeof parentPhone === 'function') {
+    operation = parentPhone;
+    parentPhone = null;
+  }
+
+  getStudentDataKey(studentPhone, parentPhone, (err, dataKey) => {
     if (err) return operation(err);
     operation(null, dataKey);
   });
 }
+
+// Bulk multi-row INSERT in chunks instead of one round-trip per item — Turso bills per query,
+// so a per-row loop is far more expensive than a few large multi-row statements.
+// Chunked to stay well under SQLite's bound-parameter limit per statement.
+const CHUNK_SIZE = 50;
+const runChunkedInsert = (tableSql, columnCount, rows, onDone) => {
+  if (!rows.length) return onDone(null);
+  const chunks = [];
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) chunks.push(rows.slice(i, i + CHUNK_SIZE));
+  const rowPlaceholder = `(${Array(columnCount).fill('?').join(', ')})`;
+  const runNext = (chunkIndex) => {
+    if (chunkIndex >= chunks.length) return onDone(null);
+    const chunk = chunks[chunkIndex];
+    const placeholders = chunk.map(() => rowPlaceholder).join(', ');
+    db.run(`${tableSql} VALUES ${placeholders}`, chunk.flat(), seedError => {
+      if (seedError) return onDone(seedError);
+      runNext(chunkIndex + 1);
+    });
+  };
+  runNext(0);
+};
 
 function seedStudentBanks(studentPhone, callback) {
   fs.readFile(path.join(__dirname, 'exams_bank.json'), 'utf8', (examError, examData) => {
@@ -698,24 +776,36 @@ function seedStudentBanks(studentPhone, callback) {
 
       getStudentDataKey(studentPhone, (keyError, dataKey) => {
         if (keyError) return callback(keyError);
-        const seedExams = (index) => {
-          if (index >= examBank.length) return seedRevisions(0);
-          const exam = examBank[index];
-          const seedPaperType = ['Paper1', 'Paper2', 'Custom'].includes(exam.paperType) ? exam.paperType : 'Paper1';
-          db.run("INSERT INTO exam_tracker (name, subject, score, total_score, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, is_custom, user_key, paper_type) SELECT ?, ?, 0, 100, 'Pending', 0, 0, 90, 0, 0, ?, ? WHERE NOT EXISTS (SELECT 1 FROM exam_tracker WHERE name = ? AND subject = ? AND user_key = ?)", [exam.name, exam.subject, dataKey, seedPaperType, exam.name, exam.subject, dataKey], seedError => {
-            if (seedError) return callback(seedError);
-            seedExams(index + 1);
+
+        // Bulk multi-row INSERT OR IGNORE in chunks instead of one round-trip per item (was
+        // 360+31 sequential queries per onboarding, each with its own scan - huge Turso read cost).
+        // Chunked to stay well under SQLite's bound-parameter limit per statement.
+        const seedExams = (onDone) => {
+          const rows = examBank.map(exam => {
+            const seedPaperType = ['Paper1', 'Paper2', 'Custom'].includes(exam.paperType) ? exam.paperType : 'Paper1';
+            return [exam.name, exam.subject, 0, 100, 'Pending', 0, 0, 90, 0, 0, dataKey, seedPaperType];
           });
+          runChunkedInsert(
+            "INSERT OR IGNORE INTO exam_tracker (name, subject, score, total_score, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, is_custom, user_key, paper_type)",
+            12,
+            rows,
+            onDone
+          );
         };
-        const seedRevisions = (index) => {
-          if (index >= revisionBank.length) return callback(null);
-          const topic = revisionBank[index];
-          db.run("INSERT OR IGNORE INTO revision_tracker (name, subject, level, progress, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, alert_dismissed_progress, is_custom, user_key) VALUES (?, ?, ?, 0, 'Pending', 0, 0, 90, 0, 0, 0, ?)", [topic.name, topic.subject, topic.level || '', dataKey], seedError => {
-            if (seedError) return callback(seedError);
-            seedRevisions(index + 1);
-          });
+        const seedRevisions = (onDone) => {
+          const rows = revisionBank.map(topic => [topic.name, topic.subject, topic.level || '', 0, 'Pending', 0, 0, 90, 0, 0, 0, dataKey]);
+          runChunkedInsert(
+            "INSERT OR IGNORE INTO revision_tracker (name, subject, level, progress, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, alert_dismissed_progress, is_custom, user_key)",
+            12,
+            rows,
+            onDone
+          );
         };
-        seedExams(0);
+
+        seedExams(examSeedError => {
+          if (examSeedError) return callback(examSeedError);
+          seedRevisions(revisionSeedError => callback(revisionSeedError || null));
+        });
       });
     });
   });
@@ -787,19 +877,25 @@ app.post('/api/auth/onboard', (req, res) => {
 
       const seedOnboarding = () => {
         const ownerPhone = requestedRole === 'parent' ? linkedStudentPhone : cleanPhone;
-        getStudentDataKey(ownerPhone, (keyError, dataKey) => {
+        const linkedParentKey = requestedRole === 'student' ? linkedParentPhone : cleanPhone;
+        getStudentDataKey(ownerPhone, linkedParentKey, (keyError, dataKey) => {
           if (keyError) return res.status(500).json({ error: keyError.message });
-          const stmt = db.prepare("INSERT INTO subject_hub (name, subject, level, confidence, progress, alert_dismissed, user_key) VALUES (?, ?, ?, 'Low', 0, 0, ?)");
-          selectedTopics.forEach(topic => stmt.run(topic.name, topic.subject, topic.level, dataKey));
-          stmt.finalize(() => {
-            createUserSession(cleanPhone, resolvedRole, (sessionErr, session) => {
-              if (sessionErr) return res.status(sessionErr.status || 500).json({ error: sessionErr.message || 'Unable to start session.' });
-              // Only the phone that onboarded gets a session here; the linked family member
-              // authenticates independently via their own PIN so their active session isn't replaced.
-              const sessions = { [cleanPhone]: session.sessionId };
-              res.json({ success: true, role: resolvedRole, sessionId: session.sessionId, loggedInAt: session.loggedInAt, sessions });
-            });
-          });
+          const rows = selectedTopics.map(topic => [topic.name, topic.subject, topic.level, 'Low', 0, 0, dataKey]);
+          runChunkedInsert(
+            "INSERT INTO subject_hub (name, subject, level, confidence, progress, alert_dismissed, user_key)",
+            7,
+            rows,
+            seedError => {
+              if (seedError) return res.status(500).json({ error: seedError.message });
+              createUserSession(cleanPhone, resolvedRole, (sessionErr, session) => {
+                if (sessionErr) return res.status(sessionErr.status || 500).json({ error: sessionErr.message || 'Unable to start session.' });
+                // Only the phone that onboarded gets a session here; the linked family member
+                // authenticates independently via their own PIN so their active session isn't replaced.
+                const sessions = { [cleanPhone]: session.sessionId };
+                res.json({ success: true, role: resolvedRole, sessionId: session.sessionId, loggedInAt: session.loggedInAt, sessions });
+              });
+            }
+          );
         });
       };
     });
@@ -1409,42 +1505,82 @@ app.post('/api/errors/log-text', (req, res) => {
 function getRevisionTopics(userKey, callback) {
   withStudentDataKey(userKey, (keyError, dataKey) => {
     if (keyError) return callback(keyError, []);
-    db.all("SELECT id, name, subject, level, progress, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, alert_dismissed_progress, is_custom, user_key FROM revision_tracker WHERE user_key IN (?, ?) ORDER BY id", [dataKey, String(userKey).trim()], callback);
+    const lookupKeys = [...new Set([dataKey, userKey].filter(Boolean))];
+    db.all("SELECT id, name, subject, level, progress, status, assigned, timer_seconds, max_time_minutes, alert_dismissed, alert_dismissed_progress, is_custom, user_key FROM revision_tracker WHERE user_key IN (?, ?) ORDER BY id", lookupKeys.length ? lookupKeys : [userKey, userKey], callback);
   });
 }
 
 function getExamRows(userKey, callback) {
   withStudentDataKey(userKey, (keyError, dataKey) => {
     if (keyError) return callback(keyError, []);
-    db.all("SELECT * FROM exam_tracker WHERE user_key IN (?, ?) ORDER BY id", [dataKey, String(userKey).trim()], callback);
+    const lookupKeys = [...new Set([dataKey, userKey].filter(Boolean))];
+    db.all("SELECT * FROM exam_tracker WHERE user_key IN (?, ?) ORDER BY id", lookupKeys.length ? lookupKeys : [userKey, userKey], callback);
   });
 }
 
 // Maps a raw exam_tracker row into the camelCase shape the frontend expects (title/totalScore/completionDate/alGrade).
 function mapExamRow(row) {
-  return { id: row.id, title: row.name, subject: row.subject, score: row.score, totalScore: row.total_score, timer_seconds: row.timer_seconds, maxTimeMinutes: row.max_time_minutes || 90, alGrade: calculateALGrade(row.score, row.total_score), status: row.status, assigned: row.assigned, alert_dismissed: row.alert_dismissed, user_key: row.user_key, completionDate: row.completion_date, paperType: row.paper_type || 'Paper1' };
+  return {
+    id: row.id,
+    name: row.name,
+    title: row.name,
+    subject: row.subject,
+    score: row.score,
+    totalScore: row.total_score,
+    timer_seconds: row.timer_seconds,
+    maxTimeMinutes: row.max_time_minutes || 90,
+    alGrade: calculateALGrade(row.score, row.total_score),
+    status: row.status,
+    assigned: row.assigned,
+    alert_dismissed: row.alert_dismissed,
+    user_key: row.user_key,
+    completionDate: row.completion_date,
+    paperType: row.paper_type || 'Paper1'
+  };
 }
 
+// Collapses concurrent/duplicate /api/dashboard calls for the same user+target into one DB
+// query burst, so client-side double-taps or races can't multiply Turso row reads.
+const pendingDashboardRequests = new Map();
+
 app.post('/api/dashboard', (req, res) => {
-  const { userKey, profileType } = req.body;
+  const { userKey, profileType, parentUserKey, selectedStudentPhone } = req.body;
   if (!userKey) return res.status(400).json({ error: "Missing userKey parameters token." });
   const cleanPhone = userKey.trim();
+  const cleanParentPhone = String(parentUserKey || '').trim();
+  const requestedSelectedStudentPhone = String(selectedStudentPhone || '').trim();
 
-  const buildDashboardForUser = (targetPhone, targetedProfileType, isParentDashboard = false) => {
-    withStudentDataKey(targetPhone, (keyError, dataKey) => {
+  const dashboardRequestKey = `${cleanPhone}|${profileType}|${requestedSelectedStudentPhone}`;
+  if (pendingDashboardRequests.has(dashboardRequestKey)) {
+    pendingDashboardRequests.get(dashboardRequestKey).push(res);
+    return;
+  }
+  const waitingResponses = [res];
+  pendingDashboardRequests.set(dashboardRequestKey, waitingResponses);
+  const broadcast = (statusCode, payload) => {
+    pendingDashboardRequests.delete(dashboardRequestKey);
+    waitingResponses.forEach(waitingRes => waitingRes.status(statusCode).json(payload));
+  };
+  res = { status: (code) => ({ json: (payload) => broadcast(code, payload) }), json: (payload) => broadcast(200, payload) };
+
+  const buildDashboardForUser = (targetPhone, targetedProfileType, isParentDashboard = false, parentScopePhone = cleanPhone) => {
+    const selectedStudent = isParentDashboard && targetPhone && targetPhone !== cleanPhone ? targetPhone : null;
+    const resolvedParentScopePhone = parentScopePhone && parentScopePhone !== targetPhone ? parentScopePhone : '';
+    withStudentDataKey(targetPhone, isParentDashboard ? (resolvedParentScopePhone || cleanParentPhone || cleanPhone) : null, (keyError, dataKey) => {
       if (keyError) return res.status(500).json({ error: keyError.message });
+      const lookupKeys = [...new Set([dataKey, targetPhone].filter(Boolean))];
     getExamRows(targetPhone, (err, examRows) => {
       const rawExams = examRows || [];
-      const exams = rawExams.map(mapExamRow);
+      const exams = rawExams.map(mapExamRow).map(exam => isParentDashboard && targetPhone ? { ...exam, user_key: targetPhone } : exam);
 
-      db.all("SELECT * FROM teacher_feedback WHERE user_key = ?", [dataKey], (feedbackErr, feedbackRows) => {
-        const feedback = feedbackRows || [];
+      db.all("SELECT * FROM teacher_feedback WHERE user_key IN (?, ?)", lookupKeys.length ? lookupKeys : [targetPhone, targetPhone], (feedbackErr, feedbackRows) => {
+        const feedback = (feedbackRows || []).map(row => isParentDashboard && targetPhone ? { ...row, user_key: targetPhone } : row);
 
-        db.all("SELECT * FROM subject_hub WHERE user_key IN (?, ?)", [dataKey, targetPhone], (hubErr, hubRows) => {
-          const syllabusProgress = hubRows || [];
+        db.all("SELECT * FROM subject_hub WHERE user_key IN (?, ?)", lookupKeys.length ? lookupKeys : [targetPhone, targetPhone], (hubErr, hubRows) => {
+          const syllabusProgress = (hubRows || []).map(row => isParentDashboard && targetPhone ? { ...row, user_key: targetPhone } : row);
           getRevisionTopics(targetPhone, (revisionError, revisionRows) => {
             if (revisionError) return res.status(500).json({ error: revisionError.message });
-            const revisionTopics = revisionRows || [];
+            const revisionTopics = (revisionRows || []).map(row => isParentDashboard && targetPhone ? { ...row, user_key: targetPhone } : row);
 
             const alerts = [];
             syllabusProgress.forEach(p => {
@@ -1469,7 +1605,9 @@ app.post('/api/dashboard', (req, res) => {
 
             const finalizeParentResponse = (payload) => {
               if (!isParentDashboard) return res.json(payload);
-              getDismissedParentAlertSet(targetPhone, (dismissErr, dismissedSet) => {
+              payload.selectedStudentPhone = selectedStudent;
+              const parentAlertPhone = resolvedParentScopePhone || cleanPhone;
+              getDismissedParentAlertSet(parentAlertPhone, (dismissErr, dismissedSet) => {
                 if (dismissErr) return res.status(500).json({ error: dismissErr.message });
                 payload.alerts = (payload.alerts || []).filter(alert => ![...dismissedSet].some(key => {
                   const [type, id, progress] = key.split(':');
@@ -1483,7 +1621,7 @@ app.post('/api/dashboard', (req, res) => {
               const studentRevisionTopics = revisionTopics.filter(topic => Number(topic.assigned) === 1 && String(topic.status || '').trim() !== 'Completed');
               db.all("SELECT name FROM mistakes_log WHERE user_key IN (?, ?) GROUP BY name ORDER BY MAX(id) DESC LIMIT 10", [dataKey, targetPhone], (err, distinctNames) => {
                 const pastDescriptions = distinctNames ? distinctNames.map(r => r.name) : [];
-                return finalizeParentResponse({ profileType: targetedProfileType, exams: exams.filter(e => e.assigned === 1 && e.status !== 'Completed'), pastDescriptions, feedback, syllabusProgress, revisionTopics: studentRevisionTopics, alerts });
+                return finalizeParentResponse({ profileType: targetedProfileType, selectedStudentPhone: null, exams: exams.filter(e => e.assigned === 1 && e.status !== 'Completed'), pastDescriptions, feedback, syllabusProgress, revisionTopics: studentRevisionTopics, alerts });
               });
               return;
             }
@@ -1518,7 +1656,7 @@ app.post('/api/dashboard', (req, res) => {
                     aggregatedMistakesMap[cleanName].photoDescriptions.push(row.description || 'No description provided');
                   }
                 });
-                finalizeParentResponse({ profileType: targetedProfileType, exams, mistakes: Object.values(aggregatedMistakesMap), alerts, feedback, syllabusProgress, revisionTopics });
+                finalizeParentResponse({ profileType: targetedProfileType, selectedStudentPhone: selectedStudent, exams, mistakes: Object.values(aggregatedMistakesMap), alerts, feedback, syllabusProgress, revisionTopics });
               };
               if (!filesQuery) return buildMistakes([]);
               db.all(filesQuery, fileParams, (fileError, uploadedRows) => buildMistakes(fileError ? [] : uploadedRows));
@@ -1538,13 +1676,23 @@ app.post('/api/dashboard', (req, res) => {
     if (linkErr) return res.status(500).json({ error: linkErr.message });
 
     const linkedStudents = (linkRows || []).map(row => row.student_phone).filter(Boolean);
+    const childPhones = [...new Set(linkedStudents)];
+    const uniqueLinkedStudents = [...new Set(linkedStudents)];
+    const selectedChild = requestedSelectedStudentPhone && uniqueLinkedStudents.includes(requestedSelectedStudentPhone)
+      ? requestedSelectedStudentPhone
+      : (uniqueLinkedStudents.length === 1 ? uniqueLinkedStudents[0] : null);
+
+    if (selectedChild) {
+      return buildDashboardForUser(selectedChild, 'parent', true, cleanPhone);
+    }
+
     const parentExams = [];
     const parentSyllabus = [];
     const parentRevision = [];
     const parentFeedback = [];
     const parentAlerts = [];
     const parentMistakes = [];
-    const childPhones = [...new Set(linkedStudents)];
+    const shouldLoadParentStudentRows = false;
 
     if (childPhones.length === 0) {
       return buildDashboardForUser(cleanPhone, 'parent', true);
@@ -1638,7 +1786,7 @@ app.post('/api/dashboard', (req, res) => {
       const childPhone = queue[completed];
       completed += 1;
 
-      withStudentDataKey(childPhone, (keyError, dataKey) => {
+      withStudentDataKey(childPhone, cleanPhone, (keyError, dataKey) => {
         if (keyError) return collectChildData();
       getExamRows(childPhone, (examErr, childExams) => {
         if (!examErr) parentExams.push(...(childExams || []).map(row => ({ ...mapExamRow(row), user_key: childPhone })));
@@ -1686,43 +1834,47 @@ app.post('/api/dashboard', (req, res) => {
       });
     };
 
-    getExamRows(cleanPhone, (selfExamErr, selfExams) => {
-      if (!selfExamErr) parentExams.push(...(selfExams || []).map(row => ({ ...mapExamRow(row), user_key: cleanPhone })));
-      db.all('SELECT * FROM subject_hub WHERE user_key = ?', [cleanPhone], (selfHubErr, selfSyllabus) => {
-        if (!selfHubErr) parentSyllabus.push(...(selfSyllabus || []).map(row => ({ ...row, user_key: cleanPhone })));
-        getRevisionTopics(cleanPhone, (selfRevisionErr, selfRevision) => {
-          if (!selfRevisionErr) parentRevision.push(...(selfRevision || []).map(row => ({ ...row, user_key: cleanPhone })));
-          db.all('SELECT * FROM teacher_feedback WHERE user_key = ?', [cleanPhone], (selfFeedbackErr, selfFeedback) => {
-            if (!selfFeedbackErr) parentFeedback.push(...(selfFeedback || []).map(row => ({ ...row, user_key: cleanPhone })));
-            db.all('SELECT * FROM mistakes_log WHERE user_key = ?', [cleanPhone], (selfMistakeErr, selfMistakes) => {
-              if (!selfMistakeErr) parentMistakes.push(...(selfMistakes || []).map(row => ({ ...row, user_key: cleanPhone })));
+    if (shouldLoadParentStudentRows) {
+      getExamRows(cleanPhone, (selfExamErr, selfExams) => {
+        if (!selfExamErr) parentExams.push(...(selfExams || []).map(row => ({ ...mapExamRow(row), user_key: cleanPhone })));
+        db.all('SELECT * FROM subject_hub WHERE user_key = ?', [cleanPhone], (selfHubErr, selfSyllabus) => {
+          if (!selfHubErr) parentSyllabus.push(...(selfSyllabus || []).map(row => ({ ...row, user_key: cleanPhone })));
+          getRevisionTopics(cleanPhone, (selfRevisionErr, selfRevision) => {
+            if (!selfRevisionErr) parentRevision.push(...(selfRevision || []).map(row => ({ ...row, user_key: cleanPhone })));
+            db.all('SELECT * FROM teacher_feedback WHERE user_key = ?', [cleanPhone], (selfFeedbackErr, selfFeedback) => {
+              if (!selfFeedbackErr) parentFeedback.push(...(selfFeedback || []).map(row => ({ ...row, user_key: cleanPhone })));
+              db.all('SELECT * FROM mistakes_log WHERE user_key = ?', [cleanPhone], (selfMistakeErr, selfMistakes) => {
+                if (!selfMistakeErr) parentMistakes.push(...(selfMistakes || []).map(row => ({ ...row, user_key: cleanPhone })));
 
-              (selfSyllabus || []).forEach(p => {
-                if ([25, 50, 75, 100].includes(Number(p.progress)) && p.alert_dismissed === 0) {
-                  parentAlerts.push({ id: p.id, type: 'syllabus', progress: Number(p.progress), message: `🎉 Syllabus milestone: Child topic "${p.name}" in ${p.subject} reached ${p.progress}% with confidence: ${p.confidence || 'Low'}.` });
-                }
+                (selfSyllabus || []).forEach(p => {
+                  if ([25, 50, 75, 100].includes(Number(p.progress)) && p.alert_dismissed === 0) {
+                    parentAlerts.push({ id: p.id, type: 'syllabus', progress: Number(p.progress), message: `🎉 Syllabus milestone: Child topic "${p.name}" in ${p.subject} reached ${p.progress}% with confidence: ${p.confidence || 'Low'}.` });
+                  }
+                });
+
+                (selfRevision || []).forEach(topic => {
+                  const progress = Number(topic.progress);
+                  const dismissedProgress = Number(topic.alert_dismissed_progress) || 0;
+                  if (Number(topic.assigned) === 1 && progress > 0 && progress > dismissedProgress) {
+                    parentAlerts.push({ id: topic.id, type: 'revision', progress, message: `🔁 Revision Update: Child revision "${topic.name}" in ${topic.subject} reached ${progress}% completion.` });
+                  }
+                });
+
+                (selfExams || []).forEach(e => {
+                  if (String(e.status || '').trim() === 'Completed' && Number(e.alert_dismissed) === 0) {
+                    parentAlerts.push({ id: e.id, type: 'exam', message: `🏆 Milestone Reached: Child prelim "${e.name}" scored ${e.score}/${e.total_score} (${calculateALGrade(e.score, e.total_score)})!` });
+                  }
+                });
+
+                collectChildData();
               });
-
-              (selfRevision || []).forEach(topic => {
-                const progress = Number(topic.progress);
-                const dismissedProgress = Number(topic.alert_dismissed_progress) || 0;
-                if (Number(topic.assigned) === 1 && progress > 0 && progress > dismissedProgress) {
-                  parentAlerts.push({ id: topic.id, type: 'revision', progress, message: `🔁 Revision Update: Child revision "${topic.name}" in ${topic.subject} reached ${progress}% completion.` });
-                }
-              });
-
-              (selfExams || []).forEach(e => {
-                if (String(e.status || '').trim() === 'Completed' && Number(e.alert_dismissed) === 0) {
-                  parentAlerts.push({ id: e.id, type: 'exam', message: `🏆 Milestone Reached: Child prelim "${e.name}" scored ${e.score}/${e.total_score} (${calculateALGrade(e.score, e.total_score)})!` });
-                }
-              });
-
-              collectChildData();
             });
           });
         });
       });
-    });
+    } else {
+      collectChildData();
+    }
   });
 });
 
